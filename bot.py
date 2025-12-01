@@ -2748,6 +2748,36 @@ if __name__ == '__main__':
     print(f'   https://discord.com/oauth2/authorize?client_id=1442827241892352073&permissions=2147568640&scope=bot')
     print(f'\n' + '='*50 + '\n')
     
+    # Start HTTP server for Render.com port binding (runs in background thread)
+    def start_http_server():
+        """Start a simple HTTP server to satisfy Render.com port requirement"""
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        
+        class HealthHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-type', 'text/plain')
+                self.end_headers()
+                self.wfile.write(b'🤖 Aternos Discord Bot is running!')
+            
+            def log_message(self, format, *args):
+                pass  # Suppress HTTP server logs
+        
+        port = int(os.getenv('PORT', 10000))
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        
+        def run_server():
+            print(f'🌐 HTTP server started on port {port}')
+            server.serve_forever()
+        
+        import threading
+        thread = threading.Thread(target=run_server, daemon=True)
+        thread.start()
+        return server
+    
+    # Start HTTP server in background
+    start_http_server()
+    
     try:
         bot.run(DISCORD_TOKEN)
     except discord.errors.LoginFailure:
