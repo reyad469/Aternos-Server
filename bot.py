@@ -9,6 +9,32 @@ from python_aternos import Client
 import time 
 import re
 from bs4 import BeautifulSoup
+import cloudscraper
+import requests
+
+# Monkey-patch requests.Session to use cloudscraper for Cloudflare bypass
+# This ensures python-aternos uses cloudscraper even if it creates sessions internally
+_original_session = requests.Session
+
+def _patched_session(*args, **kwargs):
+    """Patched Session that uses cloudscraper"""
+    scraper = cloudscraper.create_scraper(
+        browser={
+            'browser': 'chrome',
+            'platform': 'windows',
+            'desktop': True
+        },
+        delay=10
+    )
+    # Copy any kwargs to the scraper
+    if kwargs:
+        for key, value in kwargs.items():
+            if hasattr(scraper, key):
+                setattr(scraper, key, value)
+    return scraper
+
+# Apply the patch
+requests.Session = _patched_session
 
 # Load environment variables
 load_dotenv()
@@ -99,8 +125,63 @@ async def connect_to_aternos(guild_id):
         print(f'Username: {creds["username"]}')
         print(f'Password length: {len(creds["password"])} characters')
         
+        # Create cloudscraper session to bypass Cloudflare
+        print('🔧 Creating cloudscraper session to bypass Cloudflare...')
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=10
+        )
+        
+        # Set user agent to mimic a real browser
+        scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        
         client = Client()
+        
+        # Try to inject cloudscraper session into the client
+        # python-aternos uses requests internally, so we need to replace the session
+        if hasattr(client, 'session'):
+            print('   ✓ Found client.session, replacing with cloudscraper...')
+            client.session = scraper
+        elif hasattr(client, '_session'):
+            print('   ✓ Found client._session, replacing with cloudscraper...')
+            client._session = scraper
+        else:
+            print('   ⚠️ Could not find session attribute, trying alternative methods...')
+            # Try to set session on the client's internal objects
+            for attr in dir(client):
+                if 'session' in attr.lower() and not attr.startswith('__'):
+                    try:
+                        setattr(client, attr, scraper)
+                        print(f'   ✓ Set {attr} to cloudscraper session')
+                    except:
+                        pass
+        
+        # Attempt login with cloudscraper session
+        print('🔐 Attempting login with Cloudflare bypass...')
         client.login(creds['username'], creds['password'])
+        
+        # After login, try to ensure account object also uses cloudscraper
+        if hasattr(client, 'account'):
+            if hasattr(client.account, 'session'):
+                client.account.session = scraper
+                print('   ✓ Updated account.session with cloudscraper')
+            elif hasattr(client.account, '_session'):
+                client.account._session = scraper
+                print('   ✓ Updated account._session with cloudscraper')
+            # Also check for http or requests attributes
+            for attr in ['http', 'requests', '_http', '_requests']:
+                if hasattr(client.account, attr):
+                    obj = getattr(client.account, attr)
+                    if hasattr(obj, 'session'):
+                        obj.session = scraper
+                        print(f'   ✓ Updated account.{attr}.session with cloudscraper')
+        
         print(f'✅ Login successful for guild {guild_id}')
         
         servers = client.account.list_servers()
@@ -129,6 +210,18 @@ async def connect_to_aternos(guild_id):
         print(f'❌ Error connecting to Aternos for server {guild_id}:')
         print(f'   Error type: {error_type}')
         print(f'   Error message: {error_msg}')
+        
+        # If it's a Cloudflare error, provide more helpful message
+        if 'cloudflare' in error_msg.lower() or 'cf-' in error_msg.lower() or 'challenge' in error_msg.lower():
+            error_msg = f"Unable to bypass Cloudflare protection. This may be due to:\n" \
+                       f"• Cloudflare detecting automated requests\n" \
+                       f"• IP address being flagged\n" \
+                       f"• Aternos security measures\n\n" \
+                       f"Try:\n" \
+                       f"• Waiting a few minutes and trying again\n" \
+                       f"• Using a different network/VPN\n" \
+                       f"• Verifying credentials manually at https://aternos.org"
+        
         import traceback
         traceback.print_exc()
         return error_msg  # Return error message instead of False
