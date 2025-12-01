@@ -91,12 +91,20 @@ async def connect_to_aternos(guild_id):
     """Connect to Aternos for a specific server"""
     creds = get_server_credentials(guild_id)
     if not creds.get('username') or not creds.get('password'):
+        print(f'No credentials found for guild {guild_id}')
         return False
     
     try:
+        print(f'Attempting to connect to Aternos for guild {guild_id}...')
+        print(f'Username: {creds["username"]}')
+        print(f'Password length: {len(creds["password"])} characters')
+        
         client = Client()
         client.login(creds['username'], creds['password'])
+        print(f'✅ Login successful for guild {guild_id}')
+        
         servers = client.account.list_servers()
+        print(f'Found {len(servers)} server(s) for guild {guild_id}')
         
         if servers:
             server = servers[0]
@@ -112,9 +120,18 @@ async def connect_to_aternos(guild_id):
                     print(f'✅ Auto-start monitoring started for guild {guild_id}')
             
             return True
+        else:
+            print(f'⚠️ No servers found for guild {guild_id}')
+            return False
     except Exception as e:
-        print(f'Error connecting to Aternos for server {guild_id}: {e}')
-    return False
+        error_msg = str(e)
+        error_type = type(e).__name__
+        print(f'❌ Error connecting to Aternos for server {guild_id}:')
+        print(f'   Error type: {error_type}')
+        print(f'   Error message: {error_msg}')
+        import traceback
+        traceback.print_exc()
+        return error_msg  # Return error message instead of False
 
 @bot.event
 async def on_ready():
@@ -270,15 +287,19 @@ async def test_setup(ctx):
     
     test_msg = await ctx.send('🔄 Testing credentials...')
     
-    if await connect_to_aternos(ctx.guild.id):
+    result = await connect_to_aternos(ctx.guild.id)
+    if result is True:
         server = server_servers.get(str(ctx.guild.id))
         if server:
             server_addr = getattr(server, 'address', 'Server')
             await test_msg.edit(content=f'✅ **Credentials valid!**\nConnected to server: `{server_addr}`\n\nYou can now use `!start`, `!stop`, and `!status` in other channels.')
         else:
             await test_msg.edit(content='✅ Credentials valid but no servers found.')
+    elif isinstance(result, str):
+        # result is an error message
+        await test_msg.edit(content=f'❌ **Authentication failed:**\n```{result}```\n\n**Troubleshooting:**\n• Verify your username and password are correct\n• Try logging into https://aternos.org manually\n• Check if your account is locked or needs verification\n• Make sure there are no extra spaces in the password')
     else:
-        await test_msg.edit(content='❌ Invalid credentials. Please check your username and password.')
+        await test_msg.edit(content='❌ Invalid credentials. Please check your username and password.\n\n**Make sure:**\n• Username and password are set correctly\n• No extra spaces before/after\n• Account is not locked')
 
 @bot.command(name='create-setup-channel')
 @commands.has_permissions(manage_channels=True)
