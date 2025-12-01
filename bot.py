@@ -5,11 +5,54 @@ import discord
 from discord.ext import commands
 from discord.ui import Button, View
 from dotenv import load_dotenv
-from python_aternos import Client
 import time 
 import re
 from bs4 import BeautifulSoup
 import cloudscraper
+import requests
+
+# IMPORTANT: Patch requests.Session BEFORE importing python-aternos
+# This ensures python-aternos will use our Cloudflare-bypassing session
+
+# Store original Session class
+_OriginalSession = requests.Session
+
+# Create a wrapper class that uses cloudscraper
+class CloudflareSession:
+    """A Session class that uses cloudscraper to bypass Cloudflare"""
+    def __init__(self, *args, **kwargs):
+        # Create a cloudscraper session
+        self._scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=10
+        )
+        # Set user agent
+        self._scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        # Delegate all method calls to the scraper
+        for attr in dir(self._scraper):
+            if not attr.startswith('_') or attr == '__class__':
+                try:
+                    if callable(getattr(self._scraper, attr)):
+                        setattr(self, attr, getattr(self._scraper, attr))
+                except:
+                    pass
+    
+    def __getattr__(self, name):
+        # Delegate any missing attributes to the scraper
+        return getattr(self._scraper, name)
+
+# Replace requests.Session with our CloudflareSession
+# This MUST happen before python-aternos imports requests
+requests.Session = CloudflareSession
+
+# NOW import python-aternos - it will use our patched requests.Session
+from python_aternos import Client
 
 # Load environment variables
 load_dotenv()
@@ -100,95 +143,13 @@ async def connect_to_aternos(guild_id):
         print(f'Username: {creds["username"]}')
         print(f'Password length: {len(creds["password"])} characters')
         
-        # Create cloudscraper session to bypass Cloudflare
-        print('🔧 Creating cloudscraper session to bypass Cloudflare...')
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            },
-            delay=10
-        )
-        
-        # Set user agent to mimic a real browser
-        scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        })
-        
+        # Create client - it will automatically use CloudflareSession due to our patch
+        print('🔧 Creating Aternos client with Cloudflare bypass...')
         client = Client()
         
-        # Function to safely inject cloudscraper session - only replace actual session objects
-        def inject_session_safe(obj, name="object"):
-            """Safely inject cloudscraper session, avoiding methods and properties"""
-            # Only try private session attributes first (safer)
-            for attr_name in ['_session', '_http', '_requests']:
-                if hasattr(obj, attr_name):
-                    try:
-                        attr = getattr(obj, attr_name)
-                        # Only replace if it's a session-like object and NOT callable
-                        if not callable(attr):
-                            if (hasattr(attr, 'get') and hasattr(attr, 'post')) or hasattr(attr, 'request'):
-                                setattr(obj, attr_name, scraper)
-                                print(f'   ✓ Injected cloudscraper into {name}.{attr_name}')
-                                return True
-                    except Exception as e:
-                        print(f'   ⚠️ Could not inject into {name}.{attr_name}: {e}')
-            
-            # Try public 'session' attribute, but be very careful
-            if hasattr(obj, 'session'):
-                try:
-                    attr = getattr(obj, 'session')
-                    # Only replace if it's clearly a session object (not a method/property)
-                    # Check if it's callable - if so, it's likely a method or property
-                    if not callable(attr):
-                        # Check if it has session-like methods
-                        if hasattr(attr, 'get') and hasattr(attr, 'post') and hasattr(attr, 'request'):
-                            # Double-check it's not a property by trying to set it
-                            try:
-                                setattr(obj, 'session', scraper)
-                                print(f'   ✓ Injected cloudscraper into {name}.session')
-                                return True
-                            except:
-                                pass  # If we can't set it, it's probably a read-only property
-                except:
-                    pass
-            
-            return False
-        
-        # Inject session into client before login
-        print('   Injecting cloudscraper session into client...')
-        inject_session_safe(client, 'client')
-        
-        # Also check if client has a requests or http attribute that contains a session
-        for attr_name in ['http', 'requests']:
-            if hasattr(client, attr_name):
-                try:
-                    http_obj = getattr(client, attr_name)
-                    if not callable(http_obj):
-                        inject_session_safe(http_obj, f'client.{attr_name}')
-                except:
-                    pass
-        
-        # Attempt login with cloudscraper session
+        # Attempt login - should automatically use cloudscraper via patched requests.Session
         print('🔐 Attempting login with Cloudflare bypass...')
-        try:
-            client.login(creds['username'], creds['password'])
-        except Exception as login_error:
-            # If login fails, try injecting session again and retry
-            print(f'   ⚠️ Login failed, re-injecting session and retrying...')
-            print(f'   Error: {login_error}')
-            inject_session_safe(client, 'client')
-            # Also inject into account if it exists now
-            if hasattr(client, 'account'):
-                inject_session_safe(client.account, 'client.account')
-            # Retry login
-            client.login(creds['username'], creds['password'])
-        
-        # After login, ensure account object also uses cloudscraper
-        if hasattr(client, 'account'):
-            print('   Ensuring account object uses cloudscraper...')
-            inject_session_safe(client.account, 'client.account')
+        client.login(creds['username'], creds['password'])
         
         print(f'✅ Login successful for guild {guild_id}')
         
