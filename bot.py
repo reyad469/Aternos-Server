@@ -118,37 +118,55 @@ async def connect_to_aternos(guild_id):
         
         client = Client()
         
-        # Function to inject cloudscraper session into an object
-        def inject_session(obj, name="object"):
-            """Recursively inject cloudscraper session into an object"""
-            injected = False
-            # Try common session attribute names
-            for attr_name in ['session', '_session', 'http', '_http', 'requests', '_requests']:
+        # Function to safely inject cloudscraper session - only replace actual session objects
+        def inject_session_safe(obj, name="object"):
+            """Safely inject cloudscraper session, avoiding methods and properties"""
+            # Only try private session attributes first (safer)
+            for attr_name in ['_session', '_http', '_requests']:
                 if hasattr(obj, attr_name):
-                    attr = getattr(obj, attr_name)
-                    # If it's a session-like object, replace it
-                    if hasattr(attr, 'get') or hasattr(attr, 'post') or hasattr(attr, 'request'):
-                        try:
-                            setattr(obj, attr_name, scraper)
-                            print(f'   ✓ Injected cloudscraper into {name}.{attr_name}')
-                            injected = True
-                        except Exception as e:
-                            print(f'   ⚠️ Could not inject into {name}.{attr_name}: {e}')
-                    # If it's an object with its own session, recurse
-                    elif hasattr(attr, 'session') or hasattr(attr, '_session'):
-                        inject_session(attr, f'{name}.{attr_name}')
-                        injected = True
+                    try:
+                        attr = getattr(obj, attr_name)
+                        # Only replace if it's a session-like object and NOT callable
+                        if not callable(attr):
+                            if (hasattr(attr, 'get') and hasattr(attr, 'post')) or hasattr(attr, 'request'):
+                                setattr(obj, attr_name, scraper)
+                                print(f'   ✓ Injected cloudscraper into {name}.{attr_name}')
+                                return True
+                    except Exception as e:
+                        print(f'   ⚠️ Could not inject into {name}.{attr_name}: {e}')
+            
+            # Try public 'session' attribute, but be very careful
+            if hasattr(obj, 'session'):
+                try:
+                    attr = getattr(obj, 'session')
+                    # Only replace if it's clearly a session object (not a method/property)
+                    # Check if it's callable - if so, it's likely a method or property
+                    if not callable(attr):
+                        # Check if it has session-like methods
+                        if hasattr(attr, 'get') and hasattr(attr, 'post') and hasattr(attr, 'request'):
+                            # Double-check it's not a property by trying to set it
+                            try:
+                                setattr(obj, 'session', scraper)
+                                print(f'   ✓ Injected cloudscraper into {name}.session')
+                                return True
+                            except:
+                                pass  # If we can't set it, it's probably a read-only property
+                except:
+                    pass
+            
+            return False
         
         # Inject session into client before login
         print('   Injecting cloudscraper session into client...')
-        inject_session(client, 'client')
+        inject_session_safe(client, 'client')
         
-        # Also try direct attribute setting
-        for attr in dir(client):
-            if 'session' in attr.lower() and not attr.startswith('__'):
+        # Also check if client has a requests or http attribute that contains a session
+        for attr_name in ['http', 'requests']:
+            if hasattr(client, attr_name):
                 try:
-                    setattr(client, attr, scraper)
-                    print(f'   ✓ Set client.{attr} to cloudscraper session')
+                    http_obj = getattr(client, attr_name)
+                    if not callable(http_obj):
+                        inject_session_safe(http_obj, f'client.{attr_name}')
                 except:
                     pass
         
@@ -160,17 +178,17 @@ async def connect_to_aternos(guild_id):
             # If login fails, try injecting session again and retry
             print(f'   ⚠️ Login failed, re-injecting session and retrying...')
             print(f'   Error: {login_error}')
-            inject_session(client, 'client')
+            inject_session_safe(client, 'client')
             # Also inject into account if it exists now
             if hasattr(client, 'account'):
-                inject_session(client.account, 'client.account')
+                inject_session_safe(client.account, 'client.account')
             # Retry login
             client.login(creds['username'], creds['password'])
         
         # After login, ensure account object also uses cloudscraper
         if hasattr(client, 'account'):
             print('   Ensuring account object uses cloudscraper...')
-            inject_session(client.account, 'client.account')
+            inject_session_safe(client.account, 'client.account')
         
         print(f'✅ Login successful for guild {guild_id}')
         
