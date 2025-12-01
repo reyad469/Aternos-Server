@@ -17,35 +17,78 @@ import requests
 # Store original Session class
 _OriginalSession = requests.Session
 
-# Create a wrapper class that uses cloudscraper
-class CloudflareSession:
+# Create a proper subclass that uses cloudscraper
+class CloudflareSession(_OriginalSession):
     """A Session class that uses cloudscraper to bypass Cloudflare"""
     def __init__(self, *args, **kwargs):
-        # Create a cloudscraper session
+        # Don't call super().__init__ - we'll replace everything with cloudscraper
+        # Create a cloudscraper session with improved settings
         self._scraper = cloudscraper.create_scraper(
             browser={
                 'browser': 'chrome',
                 'platform': 'windows',
                 'desktop': True
             },
-            delay=10
+            delay=15,  # Increased delay for better bypass
+            debug=False
         )
-        # Set user agent
+        # Set realistic headers
         self._scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
         })
-        # Delegate all method calls to the scraper
-        for attr in dir(self._scraper):
-            if not attr.startswith('_') or attr == '__class__':
+        
+        # Copy all public attributes and methods from scraper to self
+        # This ensures compatibility with requests.Session interface
+        for attr_name in dir(self._scraper):
+            if not attr_name.startswith('__') or attr_name in ['__class__', '__dict__', '__module__']:
                 try:
-                    if callable(getattr(self._scraper, attr)):
-                        setattr(self, attr, getattr(self._scraper, attr))
+                    attr_value = getattr(self._scraper, attr_name)
+                    # Skip if it's a method we've already handled or if it's a descriptor
+                    if not callable(attr_value) or attr_name in ['get', 'post', 'put', 'delete', 'patch', 'request', 'head', 'options']:
+                        try:
+                            setattr(self, attr_name, attr_value)
+                        except (AttributeError, TypeError):
+                            pass
                 except:
                     pass
+        
+        # Ensure essential methods are bound correctly
+        self.get = self._scraper.get
+        self.post = self._scraper.post
+        self.put = self._scraper.put
+        self.delete = self._scraper.delete
+        self.patch = self._scraper.patch
+        self.request = self._scraper.request
+        self.head = self._scraper.head
+        self.options = self._scraper.options
+        
+        # Copy important attributes
+        self.headers = self._scraper.headers
+        self.cookies = self._scraper.cookies
+        self.auth = getattr(self._scraper, 'auth', None)
+        self.proxies = getattr(self._scraper, 'proxies', {})
+        self.stream = getattr(self._scraper, 'stream', False)
+        self.verify = getattr(self._scraper, 'verify', True)
+        self.cert = getattr(self._scraper, 'cert', None)
+        self.timeout = getattr(self._scraper, 'timeout', None)
+        self.max_redirects = getattr(self._scraper, 'max_redirects', 30)
     
     def __getattr__(self, name):
         # Delegate any missing attributes to the scraper
-        return getattr(self._scraper, name)
+        try:
+            return getattr(self._scraper, name)
+        except AttributeError:
+            # Fall back to original Session if scraper doesn't have it
+            return getattr(super(), name)
 
 # Replace requests.Session with our CloudflareSession
 # This MUST happen before python-aternos imports requests
@@ -143,13 +186,79 @@ async def connect_to_aternos(guild_id):
         print(f'Username: {creds["username"]}')
         print(f'Password length: {len(creds["password"])} characters')
         
-        # Create client - it will automatically use CloudflareSession due to our patch
-        print('🔧 Creating Aternos client with Cloudflare bypass...')
+        # Create cloudscraper session first with more aggressive settings
+        print('🔧 Creating cloudscraper session for Cloudflare bypass...')
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=15,  # Increased delay for better bypass
+            debug=False
+        )
+        # Set realistic headers
+        scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        })
+        
+        # Create client - it should use CloudflareSession due to our patch
+        print('🔧 Creating Aternos client...')
         client = Client()
         
-        # Attempt login - should automatically use cloudscraper via patched requests.Session
+        # After client creation, try to inject cloudscraper into the connection's session
+        # This is a fallback in case the patch didn't work
+        if hasattr(client, 'atconn'):
+            atconn = client.atconn
+            if hasattr(atconn, 'session'):
+                original_session = atconn.session
+                # Only replace if it's not already a CloudflareSession
+                if not hasattr(original_session, '_scraper'):
+                    print('   Injecting cloudscraper into connection session...')
+                    try:
+                        # Replace the session with our cloudscraper
+                        atconn.session = scraper
+                        print('   ✓ Successfully injected cloudscraper session')
+                    except Exception as inject_error:
+                        print(f'   ⚠️ Could not inject session: {inject_error}')
+        
+        # Attempt login
         print('🔐 Attempting login with Cloudflare bypass...')
-        client.login(creds['username'], creds['password'])
+        try:
+            client.login(creds['username'], creds['password'])
+        except Exception as login_error:
+            error_str = str(login_error)
+            error_type = type(login_error).__name__
+            print(f'   Login error type: {error_type}')
+            print(f'   Login error: {error_str}')
+            
+            # If it's a Cloudflare error, provide helpful message
+            if 'Cloudflare' in error_str or 'cloudflare' in error_str.lower() or 'CloudflareError' in error_type:
+                raise Exception(
+                    f"Unable to bypass Cloudflare protection.\n\n"
+                    f"This may be due to:\n"
+                    f"• Cloudflare detecting automated requests\n"
+                    f"• IP address being flagged by Cloudflare\n"
+                    f"• Aternos security measures\n"
+                    f"• Network/VPN restrictions\n\n"
+                    f"Original error: {error_str}\n\n"
+                    f"Troubleshooting:\n"
+                    f"• Wait a few minutes and try again\n"
+                    f"• Verify credentials manually at https://aternos.org\n"
+                    f"• Try from a different network/VPN\n"
+                    f"• Check if your IP is blocked"
+                )
+            else:
+                raise
         
         print(f'✅ Login successful for guild {guild_id}')
         
