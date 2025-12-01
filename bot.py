@@ -1,10 +1,14 @@
-import os
-import json
-import asyncio
+import os 
+import json 
+import asyncio 
 import discord
 from discord.ext import commands
+from discord.ui import Button, View
 from dotenv import load_dotenv
 from python_aternos import Client
+import time 
+import re
+from bs4 import BeautifulSoup
 
 # Load environment variables
 load_dotenv()
@@ -24,6 +28,15 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # Store Aternos clients per server
 server_clients = {}
 server_servers = {}
+
+# Store queue monitoring tasks
+queue_monitoring_tasks = {}
+
+# Store auto-start monitoring tasks
+auto_start_tasks = {}
+
+# Auto-start settings file
+AUTO_START_FILE = 'auto_start_settings.json'
 
 def load_credentials():
     """Load server credentials from JSON file"""
@@ -51,6 +64,29 @@ def set_server_credentials(guild_id, username, password):
     }
     save_credentials(credentials)
 
+def load_auto_start_settings():
+    """Load auto-start settings from JSON file"""
+    if os.path.exists(AUTO_START_FILE):
+        with open(AUTO_START_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_auto_start_settings(settings):
+    """Save auto-start settings to JSON file"""
+    with open(AUTO_START_FILE, 'w') as f:
+        json.dump(settings, f, indent=2)
+
+def get_auto_start_enabled(guild_id):
+    """Check if auto-start is enabled for a server"""
+    settings = load_auto_start_settings()
+    return settings.get(str(guild_id), False)
+
+def set_auto_start_enabled(guild_id, enabled):
+    """Enable or disable auto-start for a server"""
+    settings = load_auto_start_settings()
+    settings[str(guild_id)] = enabled
+    save_auto_start_settings(settings)
+
 async def connect_to_aternos(guild_id):
     """Connect to Aternos for a specific server"""
     creds = get_server_credentials(guild_id)
@@ -67,6 +103,14 @@ async def connect_to_aternos(guild_id):
             server.fetch()
             server_clients[str(guild_id)] = client
             server_servers[str(guild_id)] = server
+            
+            # Start auto-start monitoring if enabled
+            if get_auto_start_enabled(guild_id):
+                if str(guild_id) not in auto_start_tasks:
+                    task = asyncio.create_task(monitor_auto_start(guild_id))
+                    auto_start_tasks[str(guild_id)] = task
+                    print(f'✅ Auto-start monitoring started for guild {guild_id}')
+            
             return True
     except Exception as e:
         print(f'Error connecting to Aternos for server {guild_id}: {e}')
@@ -84,6 +128,13 @@ async def on_ready():
     # Connect to Aternos for all servers with credentials
     for guild in bot.guilds:
         await connect_to_aternos(guild.id)
+        
+        # Start auto-start monitoring if enabled
+        if get_auto_start_enabled(guild.id):
+            if str(guild.id) not in auto_start_tasks:
+                task = asyncio.create_task(monitor_auto_start(guild.id))
+                auto_start_tasks[str(guild.id)] = task
+                print(f'✅ Auto-start monitoring enabled for {guild.name}')
 
 @bot.event
 async def on_guild_join(guild):
@@ -269,6 +320,1628 @@ async def create_setup_channel_cmd(ctx):
     except Exception as e:
         await ctx.send(f'❌ Error creating channel: {e}')
 
+class ConfirmButton(View):
+    """View with confirm and stop buttons for queue confirmation"""
+    def __init__(self, guild_id):
+        super().__init__(timeout=300)  # 5 minute timeout
+        self.guild_id = guild_id
+        self.confirmed = False
+    
+    @discord.ui.button(label="✅ Confirm Start", style=discord.ButtonStyle.green)
+    async def confirm_button(self, interaction: discord.Interaction, button: Button):
+        """Handle confirmation button click"""
+        # CRITICAL: Defer immediately to prevent timeout
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=False)
+        except Exception as defer_error:
+            print(f'Error deferring interaction: {defer_error}')
+            try:
+                await interaction.response.send_message('⏳ Processing...', ephemeral=True)
+            except:
+                pass
+            return
+        
+        try:
+            aternos_server = server_servers.get(str(self.guild_id))
+            if not aternos_server:
+                await interaction.followup.send('❌ Server not found!', ephemeral=True)
+                return
+            
+            # Try to confirm the start
+            try:
+                # ============================================================
+                # EXTENSIVE DEBUGGING BEFORE CONFIRMATION
+                # ============================================================
+                print("=" * 60)
+                print("🔍 CONFIRM BUTTON CLICKED - DEBUGGING")
+                print("=" * 60)
+                
+                # Refresh server status first
+                print("1. Refreshing server status...")
+                aternos_server.fetch()
+                current_status = aternos_server.status
+                print(f"   Status after fetch: {current_status}")
+                
+                # Check _info for confirmation status
+                print("2. Checking _info for confirmation requirements...")
+                needs_confirm = False
+                if hasattr(aternos_server, '_info'):
+                    info_data = getattr(aternos_server, '_info')
+                    if isinstance(info_data, dict):
+                        print(f"   _info keys: {list(info_data.keys())}")
+                        if 'queue' in info_data:
+                            queue_info = info_data.get('queue', {})
+                            if isinstance(queue_info, dict):
+                                pending = queue_info.get('pending', '')
+                                position = queue_info.get('position', None)
+                                print(f"   Queue pending: '{pending}', position: {position}")
+                                if pending and str(pending).lower() == 'pending':
+                                    needs_confirm = True
+                                    print("   ✅ Confirmation needed (pending='pending')")
+                
+                # Check css_class
+                print("3. Checking css_class...")
+                css_class = getattr(aternos_server, 'css_class', 'N/A')
+                print(f"   css_class: '{css_class}'")
+                if css_class and 'pending' in str(css_class).lower():
+                    if 'queueing' not in str(css_class).lower():
+                        needs_confirm = True
+                        print("   ✅ Confirmation needed (css_class contains 'pending')")
+                
+                # Check if confirm method exists
+                print("4. Checking confirm() method...")
+                has_confirm = hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm)
+                print(f"   Has confirm method: {has_confirm}")
+                
+                # Check connection
+                print("5. Checking connection...")
+                if hasattr(aternos_server, 'atconn'):
+                    atconn = aternos_server.atconn
+                    print(f"   Has atconn: True")
+                    if hasattr(atconn, 'session'):
+                        print(f"   Has session: True")
+                
+                print("6. Server attributes before confirm:")
+                print(f"   status: {current_status}")
+                print(f"   css_class: {css_class}")
+                print(f"   needs_confirm (from checks): {needs_confirm}")
+                print("=" * 60)
+                
+                # Only confirm if we actually need to
+                if not needs_confirm and current_status == 'waiting':
+                    await interaction.followup.send(
+                        '⚠️ **Server is still in queue.**\n'
+                        'Confirmation is only needed when the queue finishes.\n'
+                        f'Current status: `{current_status}`'
+                    )
+                    return
+                
+                # Try to refresh connection/token if possible
+                print("7. Attempting to refresh connection...")
+                try:
+                    # Re-fetch to get fresh token
+                    aternos_server.fetch()
+                    print("   ✅ Server status refreshed")
+                except Exception as refresh_error:
+                    print(f"   ⚠️ Could not refresh: {refresh_error}")
+                
+                # FORCE RE-AUTHENTICATION before confirming to get fresh token
+                print("8. Force re-authenticating with Aternos to get fresh token...")
+                try:
+                    if await connect_to_aternos(self.guild_id):
+                        aternos_server = server_servers.get(str(self.guild_id))
+                        if aternos_server:
+                            aternos_server.fetch()
+                            print("   ✅ Re-authenticated and refreshed server")
+                        else:
+                            print("   ⚠️ Re-authenticated but server not found")
+                    else:
+                        print("   ⚠️ Re-authentication failed, continuing with existing connection")
+                except Exception as reauth_error:
+                    print(f"   ⚠️ Re-authentication error (non-critical): {reauth_error}")
+                
+                # Small delay to ensure server is ready for confirmation
+                print("8.5. Waiting 1 second before confirming (ensuring server is ready)...")
+                await asyncio.sleep(1)
+                
+                # Final status check right before confirming
+                print("8.6. Final status check before confirming...")
+                aternos_server.fetch()
+                final_status = aternos_server.status
+                print(f"   Final status: {final_status}")
+                
+                # Send confirmation to Aternos - Try multiple methods
+                print("9. Attempting to confirm server start...")
+                confirm_success = False
+                last_error = None
+                
+                try:
+                    # Get the connection
+                    if hasattr(aternos_server, 'atconn'):
+                        atconn = aternos_server.atconn
+                        server_id = aternos_server.servid
+                        
+                        # Method 1: Use request_cloudflare (most reliable for Aternos)
+                        if hasattr(atconn, 'request_cloudflare'):
+                            try:
+                                print("   Trying request_cloudflare method...")
+                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                
+                                # Debug: Check session cookies/headers if possible
+                                if hasattr(atconn, 'session'):
+                                    session = atconn.session
+                                    print("   Session available, checking cookies...")
+                                    try:
+                                        if hasattr(session, 'cookies'):
+                                            cookies = dict(session.cookies)
+                                            print(f"   Session cookies keys: {list(cookies.keys())[:5]}...")  # First 5 keys
+                                    except:
+                                        pass
+                                
+                                # Try GET first (website might use GET)
+                                try:
+                                    print("   Attempting GET request...")
+                                    response = atconn.request_cloudflare(confirm_url, 'GET')
+                                    print(f"   ✅ GET response received: {response}")
+                                    print(f"   Response type: {type(response)}")
+                                    
+                                    # Any response means the request was accepted
+                                    if response is not None:
+                                        confirm_success = True
+                                        print("   ✅✅✅ CONFIRMATION SUCCESSFUL via GET!")
+                                    else:
+                                        raise Exception("Got None response")
+                                        
+                                except Exception as get_error:
+                                    error_str = str(get_error)
+                                    print(f"   ⚠️ GET failed: {error_str}")
+                                    
+                                    # If it's a 400, the request format might be wrong - try POST
+                                    # But also check if server actually needs confirmation
+                                    if '400' in error_str or 'Bad Request' in error_str:
+                                        print("   Got 400 error - server might not be ready for confirmation")
+                                        print("   Will try POST as alternative...")
+                                    
+                                    # Try POST as alternative
+                                    try:
+                                        print("   Attempting POST request...")
+                                        response = atconn.request_cloudflare(confirm_url, 'POST')
+                                        print(f"   ✅ POST response received: {response}")
+                                        
+                                        if response is not None:
+                                            confirm_success = True
+                                            print("   ✅✅✅ CONFIRMATION SUCCESSFUL via POST!")
+                                        else:
+                                            raise Exception("Got None response from POST")
+                                    except Exception as post_error:
+                                        post_error_str = str(post_error)
+                                        print(f"   ⚠️ POST also failed: {post_error_str}")
+                                        
+                                        # If both fail with 400, the server might not be ready
+                                        if '400' in post_error_str or 'Bad Request' in post_error_str:
+                                            raise Exception(f"Server returned 400 Bad Request. This usually means:\n"
+                                                          f"1. Server doesn't need confirmation right now\n"
+                                                          f"2. Token/SEC expired (try restarting bot)\n"
+                                                          f"3. Server status changed\n"
+                                                          f"Error: {post_error_str}")
+                                        raise post_error
+                                        
+                            except Exception as cf_error:
+                                error_str = str(cf_error)
+                                print(f"   ❌ request_cloudflare completely failed: {cf_error}")
+                                print(f"   Error details: {type(cf_error).__name__}")
+                                last_error = cf_error
+                        
+                        # Method 2: Direct session call if request_cloudflare didn't work
+                        if not confirm_success and hasattr(atconn, 'session'):
+                            try:
+                                print("   Trying direct session call...")
+                                session = atconn.session
+                                import aiohttp
+                                import requests
+                                
+                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                
+                                if isinstance(session, aiohttp.ClientSession):
+                                    async with session.get(confirm_url) as response:
+                                        if response.status == 200:
+                                            result = await response.text()
+                                            print(f"   ✅ Direct session GET successful: {result}")
+                                            confirm_success = True
+                                elif isinstance(session, requests.Session):
+                                    import asyncio
+                                    loop = asyncio.get_event_loop()
+                                    response = await loop.run_in_executor(None, session.get, confirm_url)
+                                    if response.status_code == 200:
+                                        print(f"   ✅ Direct session GET successful: {response.text}")
+                                        confirm_success = True
+                            except Exception as session_error:
+                                print(f"   ⚠️ Direct session call failed: {session_error}")
+                                if not last_error:
+                                    last_error = session_error
+                        
+                        # Method 3: Try library confirm() method as last resort
+                        if not confirm_success:
+                            try:
+                                print("   Trying library confirm() method as fallback...")
+                                aternos_server.confirm()
+                                print("   ✅ Library confirm() method called")
+                                confirm_success = True
+                            except Exception as lib_error:
+                                print(f"   ⚠️ Library confirm() failed: {lib_error}")
+                                if not last_error:
+                                    last_error = lib_error
+                    else:
+                        # No atconn, try library method
+                        print("   No atconn, trying library confirm() method...")
+                        aternos_server.confirm()
+                        print("   ✅ Library confirm() method called")
+                        confirm_success = True
+                        
+                except Exception as confirm_error:
+                    print(f"   ❌ All confirm methods failed")
+                    last_error = confirm_error
+                    import traceback
+                    traceback.print_exc()
+                
+                if confirm_success:
+                    self.confirmed = True
+                    print("   ✅✅✅ CONFIRMATION SUCCESSFUL!")
+                else:
+                    raise Exception(f"All confirmation methods failed. Last error: {last_error}")
+                
+                # Disable both buttons
+                for item in self.children:
+                    item.disabled = True
+                
+                # Edit the message to disable buttons
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception as edit_error:
+                    print(f'Could not edit message (non-critical): {edit_error}')
+                
+                # Send success message
+                await interaction.followup.send('✅ **Confirmation sent!** Starting server...\n⏳ Please wait, server is starting...')
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f'❌❌❌ Error confirming server: {e}')
+                import traceback
+                traceback.print_exc()
+                
+                # Try to re-authenticate if it's a 400/401 error
+                if '400' in error_msg or '401' in error_msg or 'Bad Request' in error_msg:
+                    print("🔄 Attempting to re-authenticate due to 400/401 error...")
+                    print("   This will get a fresh Aternos token...")
+                    try:
+                        # Force re-authentication
+                        guild_id_str = str(self.guild_id)
+                        if await connect_to_aternos(self.guild_id):
+                            print("✅ Re-authenticated successfully with fresh token")
+                            aternos_server = server_servers.get(guild_id_str)
+                            if aternos_server:
+                                # Fetch fresh status
+                                aternos_server.fetch()
+                                print(f"   Fresh status: {aternos_server.status}")
+                                
+                                # Check if still needs confirmation
+                                still_needs_confirm = False
+                                if hasattr(aternos_server, '_info'):
+                                    info_data = getattr(aternos_server, '_info')
+                                    if isinstance(info_data, dict) and 'queue' in info_data:
+                                        queue_info = info_data.get('queue', {})
+                                        if isinstance(queue_info, dict):
+                                            pending = queue_info.get('pending', '')
+                                            if pending and str(pending).lower() == 'pending':
+                                                still_needs_confirm = True
+                                
+                                if still_needs_confirm or aternos_server.status != 'online':
+                                    # Try confirm again with fresh token
+                                    try:
+                                        print("   Attempting confirm() with fresh token...")
+                                        aternos_server.confirm()
+                                        print("   ✅ Confirm successful with fresh token!")
+                                        self.confirmed = True
+                                        for item in self.children:
+                                            item.disabled = True
+                                        try:
+                                            await interaction.message.edit(view=self)
+                                        except:
+                                            pass
+                                        await interaction.followup.send('✅ **Confirmation sent!** (After re-authentication)\n⏳ Starting server...')
+                                        return
+                                    except Exception as retry_error:
+                                        print(f"❌ Confirm failed after re-auth: {retry_error}")
+                                        import traceback
+                                        traceback.print_exc()
+                                else:
+                                    print("   Server no longer needs confirmation")
+                    except Exception as reconnect_error:
+                        print(f"❌ Re-authentication failed: {reconnect_error}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Send error message
+                try:
+                    await interaction.followup.send(
+                        f'❌ **Error confirming:** {error_msg}\n\n'
+                        f'**Possible causes:**\n'
+                        f'• Server might not need confirmation right now\n'
+                        f'• Token expired - try restarting the bot\n'
+                        f'• Server status changed\n\n'
+                        f'**Try:**\n'
+                        f'• Check Aternos website manually\n'
+                        f'• Use `!confirm` command\n'
+                        f'• Restart the bot if error persists'
+                    )
+                except:
+                    pass
+        except Exception as e:
+            print(f'Error in confirm button handler: {e}')
+            import traceback
+            traceback.print_exc()
+            try:
+                await interaction.followup.send('❌ An error occurred. Please try again or use `!confirm` command.', ephemeral=True)
+            except:
+                pass
+    
+    @discord.ui.button(label="🛑 Stop", style=discord.ButtonStyle.red)
+    async def stop_button(self, interaction: discord.Interaction, button: Button):
+        """Handle stop button click"""
+        # CRITICAL: Defer immediately to prevent timeout
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer(ephemeral=False)
+        except Exception as defer_error:
+            print(f'Error deferring interaction: {defer_error}')
+            try:
+                await interaction.response.send_message('⏳ Processing...', ephemeral=True)
+            except:
+                pass
+            return
+        
+        try:
+            aternos_server = server_servers.get(str(self.guild_id))
+            if not aternos_server:
+                await interaction.followup.send('❌ Server not found!', ephemeral=True)
+                return
+            
+            try:
+                # Refresh server status first
+                aternos_server.fetch()
+                
+                # Stop the server
+                aternos_server.stop()
+                
+                # Disable both buttons
+                for item in self.children:
+                    item.disabled = True
+                
+                # Edit the message to disable buttons
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception as edit_error:
+                    print(f'Could not edit message (non-critical): {edit_error}')
+                
+                await interaction.followup.send('✅ **Server stop command sent!**')
+                
+            except Exception as e:
+                error_msg = str(e)
+                print(f'Error stopping server: {e}')
+                import traceback
+                traceback.print_exc()
+                try:
+                    await interaction.followup.send(f'❌ **Error stopping server:** {error_msg}')
+                except:
+                    pass
+        except Exception as e:
+            print(f'Error in stop button handler: {e}')
+            import traceback
+            traceback.print_exc()
+            try:
+                await interaction.followup.send('❌ An error occurred. Please try again.', ephemeral=True)
+            except:
+                pass
+
+async def fetch_queue_data_from_panel(aternos_server):
+    """Fetch queue position and time from Aternos panel page HTML"""
+    queue_position = None
+    queue_time_str = None
+    
+    try:
+        if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
+            atconn = aternos_server.atconn
+            server_id = aternos_server.servid
+            
+            # Try multiple URLs
+            urls_to_try = [
+                'https://aternos.org/server/',  # Main panel
+                f'https://aternos.org/server/?id={server_id}',  # Server-specific
+                'https://aternos.org/panel/',  # Panel page
+            ]
+            
+            # Use the session from atconn
+            if hasattr(atconn, 'session'):
+                session = atconn.session
+                import aiohttp
+                import requests
+                
+                for panel_url in urls_to_try:
+                    try:
+                        if isinstance(session, aiohttp.ClientSession):
+                            # Async aiohttp session
+                            async with session.get(panel_url) as response:
+                                print(f"Fetching queue data from: {panel_url} (status: {response.status})")
+                                if response.status == 200:
+                                    html_content = await response.text()
+                                    queue_position, queue_time_str = parse_queue_from_html(html_content)
+                                    if queue_position or queue_time_str:
+                                        print(f"Successfully found queue data from {panel_url}")
+                                        break
+                                else:
+                                    print(f"Failed to fetch {panel_url}: Status {response.status}")
+                        elif isinstance(session, requests.Session):
+                            # Sync requests session
+                            import asyncio
+                            loop = asyncio.get_event_loop()
+                            response = await loop.run_in_executor(None, session.get, panel_url)
+                            print(f"Fetching queue data from: {panel_url} (status: {response.status_code})")
+                            if response.status_code == 200:
+                                html_content = response.text
+                                queue_position, queue_time_str = parse_queue_from_html(html_content)
+                                if queue_position or queue_time_str:
+                                    print(f"Successfully found queue data from {panel_url}")
+                                    break
+                            else:
+                                print(f"Failed to fetch {panel_url}: Status {response.status_code}")
+                    except Exception as e:
+                        print(f"Error fetching {panel_url}: {e}")
+                        continue
+                        
+                # If HTML parsing didn't work, try the queue API endpoint
+                if not queue_position and not queue_time_str:
+                    try:
+                        queue_api_url = f'https://aternos.org/panel/ajax/queue.php?id={server_id}'
+                        print(f"Trying queue API: {queue_api_url}")
+                        
+                        if isinstance(session, aiohttp.ClientSession):
+                            async with session.get(queue_api_url) as response:
+                                if response.status == 200:
+                                    try:
+                                        api_data = await response.json()
+                                        print(f"Queue API response: {api_data}")
+                                        # Parse API response
+                                        if isinstance(api_data, dict):
+                                            # Look for position in various formats
+                                            for key in ['position', 'pos', 'queue_pos', 'current']:
+                                                if key in api_data:
+                                                    pos_val = api_data[key]
+                                                    if isinstance(pos_val, (int, str)):
+                                                        queue_position = str(pos_val)
+                                                        # Check for max position
+                                                        for max_key in ['max', 'max_position', 'total']:
+                                                            if max_key in api_data:
+                                                                max_val = api_data[max_key]
+                                                                queue_position = f"{pos_val} / {max_val}"
+                                                                break
+                                                        break
+                                            
+                                            # Look for time
+                                            for key in ['time', 'wait', 'eta', 'estimated']:
+                                                if key in api_data:
+                                                    time_val = api_data[key]
+                                                    if isinstance(time_val, (int, float)):
+                                                        minutes = int(time_val / 60) if time_val > 60 else int(time_val)
+                                                        queue_time_str = f"ca. {minutes} min"
+                                                        break
+                                    except:
+                                        # Try as text/HTML
+                                        text_data = await response.text()
+                                        queue_position, queue_time_str = parse_queue_from_html(text_data)
+                                elif response.status == 503:
+                                    # Service Unavailable - silently skip
+                                    pass
+                        elif isinstance(session, requests.Session):
+                            import asyncio
+                            loop = asyncio.get_event_loop()
+                            response = await loop.run_in_executor(None, session.get, queue_api_url)
+                            if response.status_code == 200:
+                                try:
+                                    api_data = response.json()
+                                    print(f"Queue API response: {api_data}")
+                                    # Same parsing as above
+                                    if isinstance(api_data, dict):
+                                        for key in ['position', 'pos', 'queue_pos', 'current']:
+                                            if key in api_data:
+                                                pos_val = api_data[key]
+                                                if isinstance(pos_val, (int, str)):
+                                                    queue_position = str(pos_val)
+                                                    for max_key in ['max', 'max_position', 'total']:
+                                                        if max_key in api_data:
+                                                            max_val = api_data[max_key]
+                                                            queue_position = f"{pos_val} / {max_val}"
+                                                            break
+                                                    break
+                                        
+                                        for key in ['time', 'wait', 'eta', 'estimated']:
+                                            if key in api_data:
+                                                time_val = api_data[key]
+                                                if isinstance(time_val, (int, float)):
+                                                    minutes = int(time_val / 60) if time_val > 60 else int(time_val)
+                                                    queue_time_str = f"ca. {minutes} min"
+                                                    break
+                                except:
+                                    text_data = response.text
+                                    queue_position, queue_time_str = parse_queue_from_html(text_data)
+                            elif response.status_code == 503:
+                                # Service Unavailable - silently skip
+                                pass
+                    except Exception as e:
+                        error_str = str(e)
+                        # Don't spam console with 503 errors
+                        if '503' not in error_str and 'Service Unavailable' not in error_str:
+                            print(f"Error fetching queue API: {e}")
+            else:
+                print("No session available in atconn")
+    except Exception as e:
+        print(f"Error in fetch_queue_data_from_panel: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return queue_position, queue_time_str
+
+def parse_queue_from_html(html_content):
+    """Parse queue position and time from Aternos HTML"""
+    queue_position = None
+    queue_time_str = None
+    
+    try:
+        # Try using BeautifulSoup if available
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Find queue position: <span class="server-status-label-right queue-position"> (may have "hidden" class)
+            queue_pos_elem = soup.find('span', class_=lambda x: x and 'queue-position' in x)
+            if queue_pos_elem:
+                queue_position = queue_pos_elem.get_text(strip=True)
+                if queue_position:
+                    print(f"Found queue position in HTML: {queue_position}")
+            
+            # Find queue time: <div class="server-status-label-left queue-time"> (may have "hidden" class)
+            queue_time_elem = soup.find('div', class_=lambda x: x and 'queue-time' in x)
+            if queue_time_elem:
+                queue_time_str = queue_time_elem.get_text(strip=True)
+                if queue_time_str:
+                    print(f"Found queue time in HTML: {queue_time_str}")
+        except ImportError:
+            # BeautifulSoup not available, use regex
+            pass
+        except Exception as e:
+            print(f"Error with BeautifulSoup, trying regex: {e}")
+        
+        # Always try regex as fallback (works even if BeautifulSoup failed)
+        if not queue_position:
+            # Pattern for queue position: "3535 / 3835" or "3535/3835" (handles "hidden" class)
+            pos_match = re.search(r'<span[^>]*class="[^"]*queue-position[^"]*"[^>]*>([^<]+)</span>', html_content, re.IGNORECASE | re.DOTALL)
+            if pos_match:
+                queue_position = pos_match.group(1).strip()
+                if queue_position:
+                    print(f"Found queue position in HTML (regex): {queue_position}")
+        
+        if not queue_time_str:
+            # Pattern for queue time: "ca. 8 min" (handles "hidden" class)
+            time_match = re.search(r'<div[^>]*class="[^"]*queue-time[^"]*"[^>]*>([^<]+)</div>', html_content, re.IGNORECASE | re.DOTALL)
+            if time_match:
+                queue_time_str = time_match.group(1).strip()
+                if queue_time_str:
+                    print(f"Found queue time in HTML (regex): {queue_time_str}")
+        
+        # Also try to find the data in the status div directly
+        if not queue_position or not queue_time_str:
+            # Look for the pattern in the status div: <div class="status queueing">
+            status_match = re.search(r'<div[^>]*class="[^"]*status[^"]*queueing[^"]*"[^>]*>.*?</div>', html_content, re.IGNORECASE | re.DOTALL)
+            if status_match:
+                status_html = status_match.group(0)
+                # Try to extract from this section
+                if not queue_position:
+                    pos_in_status = re.search(r'(\d+\s*[/]\s*\d+)', status_html)
+                    if pos_in_status:
+                        queue_position = pos_in_status.group(1).strip()
+                        print(f"Found queue position in status div: {queue_position}")
+                
+                if not queue_time_str:
+                    time_in_status = re.search(r'ca\.\s*(\d+)\s*min', status_html, re.IGNORECASE)
+                    if time_in_status:
+                        queue_time_str = f"ca. {time_in_status.group(1)} min"
+                        print(f"Found queue time in status div: {queue_time_str}")
+    except Exception as e:
+        print(f"Error parsing HTML: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return queue_position, queue_time_str
+
+async def monitor_auto_start(guild_id):
+    """Background task to monitor server and auto-start if it goes offline"""
+    print(f"🔄 Auto-start monitoring started for guild {guild_id}")
+    last_status = None
+    
+    while True:
+        try:
+            # Check if auto-start is still enabled
+            if not get_auto_start_enabled(guild_id):
+                print(f"⏸️ Auto-start disabled for guild {guild_id}, stopping monitor")
+                if str(guild_id) in auto_start_tasks:
+                    del auto_start_tasks[str(guild_id)]
+                return
+            
+            # Get server
+            aternos_server = server_servers.get(str(guild_id))
+            if not aternos_server:
+                # Server not configured, wait longer before retry
+                await asyncio.sleep(60)
+                continue
+            
+            try:
+                # Refresh server status
+                aternos_server.fetch()
+                current_status = aternos_server.status
+                
+                # Only log status changes
+                if current_status != last_status:
+                    print(f"📊 Server status for guild {guild_id}: {current_status}")
+                    last_status = current_status
+                
+                # If server is offline, start it automatically
+                if current_status == 'offline':
+                    print(f"🔴 Server is offline for guild {guild_id}, auto-starting...")
+                    
+                    try:
+                        # Start the server
+                        aternos_server.start()
+                        print(f"✅ Auto-start command sent for guild {guild_id}")
+                        
+                        # Wait a bit for status to update
+                        await asyncio.sleep(5)
+                        
+                        # Check if it's in queue or starting
+                        aternos_server.fetch()
+                        new_status = aternos_server.status
+                        
+                        if new_status in ['waiting', 'starting', 'loading', 'loading_preparing']:
+                            print(f"⏳ Server is now {new_status} for guild {guild_id}")
+                        elif new_status == 'online':
+                            print(f"🟢 Server is already online for guild {guild_id}")
+                        else:
+                            print(f"📡 Server status after auto-start: {new_status}")
+                            
+                    except Exception as start_error:
+                        print(f"❌ Error auto-starting server for guild {guild_id}: {start_error}")
+                
+                # Wait 5 seconds before next check (adjustable)
+                await asyncio.sleep(5)
+                
+            except Exception as fetch_error:
+                print(f"⚠️ Error fetching server status for guild {guild_id}: {fetch_error}")
+                # Wait longer on error
+                await asyncio.sleep(60)
+                
+        except asyncio.CancelledError:
+            print(f"🛑 Auto-start monitoring cancelled for guild {guild_id}")
+            if str(guild_id) in auto_start_tasks:
+                del auto_start_tasks[str(guild_id)]
+            return
+        except Exception as e:
+            print(f"❌ Error in auto-start monitor for guild {guild_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Wait longer on error
+            await asyncio.sleep(60)
+
+async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
+    """Monitor queue status with real-time updates"""
+    try:
+        start_time = time.time()
+        last_queue_time = None
+        last_queue_position = None
+        last_queue_time_str = None
+        static_queue_time_str = None  # Store the static "ca. X min" value
+        
+        while True:
+            try:
+                # Refresh server status
+                aternos_server.fetch()
+                current_status = aternos_server.status
+                
+                # Debug: Print status and key indicators
+                print(f"Status: {current_status}")
+                
+                # Comprehensive debug output when checking for confirmation
+                if hasattr(aternos_server, '_info'):
+                    info_data = getattr(aternos_server, '_info')
+                    if isinstance(info_data, dict) and 'queue' in info_data:
+                        queue_info = info_data.get('queue', {})
+                        if isinstance(queue_info, dict):
+                            pending = queue_info.get('pending', '')
+                            position = queue_info.get('position', None)
+                            if pending or (position is not None and position <= 5):
+                                print(f"🔍 CONFIRM CHECK: status={current_status}, pending='{pending}', position={position}, css_class={getattr(aternos_server, 'css_class', 'N/A')}")
+                
+                # ========================================================================
+                # COMPREHENSIVE CONFIRMATION DETECTION - CHECK FIRST, BEFORE QUEUE STATUS
+                # ========================================================================
+                # This section checks EVERY possible indicator that confirmation is needed
+                # Multiple fallbacks ensure instant detection when website shows "Confirm now!"
+                # ========================================================================
+                confirm_required = False
+                confirm_reason = None
+                
+                try:
+                    # ====================================================================
+                    # METHOD 1: Check _info['queue']['pending'] - PRIMARY INDICATOR
+                    # ====================================================================
+                    if hasattr(aternos_server, '_info'):
+                        info_data = getattr(aternos_server, '_info')
+                        if isinstance(info_data, dict):
+                            # Check queue data in _info
+                            if 'queue' in info_data:
+                                queue_info = info_data['queue']
+                                if isinstance(queue_info, dict):
+                                    # PRIMARY CHECK: pending status
+                                    pending = queue_info.get('pending', '')
+                                    position = queue_info.get('position', None)
+                                    count = queue_info.get('count', None)
+                                    queue_status = queue_info.get('queue', None)
+                                    
+                                    # Check 1.1: pending == 'pending' (most reliable)
+                                    if pending:
+                                        pending_lower = str(pending).lower()
+                                        if pending_lower == 'pending':
+                                            confirm_required = True
+                                            confirm_reason = f"queue.pending='{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                        
+                                        # Check 1.2: 'confirm' in pending
+                                        elif 'confirm' in pending_lower:
+                                            confirm_required = True
+                                            confirm_reason = f"queue.pending contains 'confirm': '{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    
+                                    # Check 1.3: Position is 1 or 0 (queue finished)
+                                    if not confirm_required and position is not None:
+                                        if position <= 1:
+                                            # Position 1 or 0 + pending = needs confirmation
+                                            if pending and str(pending).lower() == 'pending':
+                                                confirm_required = True
+                                                confirm_reason = f"queue position={position}, pending='{pending}'"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                            # Position 1 + status not waiting = likely needs confirmation
+                                            elif current_status != 'waiting' and current_status != 'online' and current_status != 'starting':
+                                                confirm_required = True
+                                                confirm_reason = f"queue position={position}, status={current_status}"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    
+                                    # Check 1.4: Queue status changed
+                                    if not confirm_required and queue_status is not None:
+                                        if queue_status != 2 and position is not None and position <= 1:
+                                            confirm_required = True
+                                            confirm_reason = f"queue.queue={queue_status}, position={position}"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    
+                                    # Debug logging for low positions
+                                    if position is not None and position <= 10:
+                                        print(f"🔍 DEBUG: position={position}, pending='{pending}', status={current_status}, queue={queue_status}")
+                            
+                            # ============================================================
+                            # METHOD 2: Check _info['label'] and _info['class']
+                            # ============================================================
+                            label = info_data.get('label', '')
+                            info_class = info_data.get('class', '')
+                            lang = info_data.get('lang', '')
+                            
+                            # Check 2.1: Label contains confirm/pending
+                            if not confirm_required and label:
+                                label_lower = str(label).lower()
+                                if 'confirm' in label_lower:
+                                    confirm_required = True
+                                    confirm_reason = f"label contains 'confirm': '{label}'"
+                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                elif 'pending' in label_lower and 'waiting' not in label_lower:
+                                    confirm_required = True
+                                    confirm_reason = f"label contains 'pending': '{label}'"
+                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                            
+                            # Check 2.2: Class contains confirm/pending/queueconfirm
+                            if not confirm_required and info_class:
+                                class_lower = str(info_class).lower()
+                                if 'confirm' in class_lower or 'queueconfirm' in class_lower:
+                                    confirm_required = True
+                                    confirm_reason = f"class contains 'confirm': '{info_class}'"
+                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                elif 'pending' in class_lower and 'queueing' not in class_lower:
+                                    confirm_required = True
+                                    confirm_reason = f"class contains 'pending': '{info_class}'"
+                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                            
+                            # Check 2.3: Lang field
+                            if not confirm_required and lang:
+                                lang_lower = str(lang).lower()
+                                if 'confirm' in lang_lower or 'pending' in lang_lower:
+                                    if 'waiting' not in lang_lower:
+                                        confirm_required = True
+                                        confirm_reason = f"lang contains confirm/pending: '{lang}'"
+                                        print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                            
+                            # ============================================================
+                            # METHOD 3: Check status_num and status changes
+                            # ============================================================
+                            status_num = info_data.get('status', None)
+                            if not confirm_required and status_num is not None:
+                                # Status 10 = waiting, other statuses might indicate confirmation needed
+                                if status_num != 10:  # Not waiting
+                                    if current_status != 'online' and current_status != 'starting' and current_status != 'offline':
+                                        # Check if queue has pending status
+                                        if 'queue' in info_data:
+                                            queue_info = info_data.get('queue', {})
+                                            if isinstance(queue_info, dict):
+                                                pending = queue_info.get('pending', '')
+                                                if pending and str(pending).lower() == 'pending':
+                                                    confirm_required = True
+                                                    confirm_reason = f"status_num={status_num}, pending='{pending}'"
+                                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                            
+                            # ============================================================
+                            # METHOD 4: Check all _info keys for confirmation indicators
+                            # ============================================================
+                            if not confirm_required:
+                                for key, value in info_data.items():
+                                    if value and isinstance(value, (str, int)):
+                                        value_str = str(value).lower()
+                                        # Look for confirm/pending in any value
+                                        if key != 'label' and key != 'class' and key != 'lang':
+                                            if ('confirm' in value_str or 'pending' in value_str) and 'waiting' not in value_str:
+                                                # Check if this is a meaningful indicator
+                                                if key in ['message', 'text', 'status_text', 'action']:
+                                                    confirm_required = True
+                                                    confirm_reason = f"_info['{key}']='{value}'"
+                                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                                    break
+                    
+                    
+                    # ============================================================
+                    # METHOD 5: Check css_class attribute
+                    # ============================================================
+                    if not confirm_required and hasattr(aternos_server, 'css_class'):
+                        css_class = str(aternos_server.css_class)
+                        css_class_lower = css_class.lower()
+                        
+                        # Check 5.1: Contains confirm/queueconfirm
+                        if 'confirm' in css_class_lower or 'queueconfirm' in css_class_lower:
+                            if 'queueing' not in css_class_lower or css_class_lower != 'queueing':
+                                confirm_required = True
+                                confirm_reason = f"css_class='{css_class}'"
+                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                        
+                        # Check 5.2: Contains pending (but not just "queueing")
+                        elif 'pending' in css_class_lower:
+                            if css_class_lower != 'queueing' and 'queueing' not in css_class_lower:
+                                confirm_required = True
+                                confirm_reason = f"css_class contains 'pending': '{css_class}'"
+                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                    
+                    # ============================================================
+                    # METHOD 6: Check status string
+                    # ============================================================
+                    if not confirm_required and current_status:
+                        status_lower = str(current_status).lower()
+                        
+                        # Check 6.1: Status contains confirm
+                        if 'confirm' in status_lower:
+                            confirm_required = True
+                            confirm_reason = f"status contains 'confirm': '{current_status}'"
+                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                        
+                        # Check 6.2: Status contains pending (but not waiting)
+                        elif 'pending' in status_lower and 'waiting' not in status_lower:
+                            confirm_required = True
+                            confirm_reason = f"status contains 'pending': '{current_status}'"
+                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                        
+                        # Check 6.3: Status is queueconfirm
+                        elif status_lower == 'queueconfirm':
+                            confirm_required = True
+                            confirm_reason = f"status='queueconfirm'"
+                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                    
+                    # ============================================================
+                    # METHOD 7: Check status transitions (waiting -> something else)
+                    # ============================================================
+                    if not confirm_required:
+                        # If status changed from waiting to something else (but not online/starting/offline)
+                        if current_status not in ['waiting', 'online', 'starting', 'offline', 'stopping']:
+                            # Check _info for pending status
+                            if hasattr(aternos_server, '_info'):
+                                info_data = getattr(aternos_server, '_info')
+                                if isinstance(info_data, dict) and 'queue' in info_data:
+                                    queue_info = info_data.get('queue', {})
+                                    if isinstance(queue_info, dict):
+                                        pending = queue_info.get('pending', '')
+                                        position = queue_info.get('position', None)
+                                        
+                                        # If pending is set or position is 1, needs confirmation
+                                        if pending and str(pending).lower() == 'pending':
+                                            confirm_required = True
+                                            confirm_reason = f"status changed to '{current_status}', pending='{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                        elif position is not None and position <= 1:
+                                            confirm_required = True
+                                            confirm_reason = f"status changed to '{current_status}', position={position}"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                    
+                    # ============================================================
+                    # METHOD 8: Check countdown value
+                    # ============================================================
+                    if not confirm_required and hasattr(aternos_server, 'countdown'):
+                        countdown = aternos_server.countdown
+                        # Countdown 0 or None + not waiting/online = might need confirmation
+                        if (countdown == 0 or countdown is None) and current_status not in ['waiting', 'online', 'starting', 'offline']:
+                            # Double-check with _info
+                            if hasattr(aternos_server, '_info'):
+                                info_data = getattr(aternos_server, '_info')
+                                if isinstance(info_data, dict) and 'queue' in info_data:
+                                    queue_info = info_data.get('queue', {})
+                                    if isinstance(queue_info, dict):
+                                        pending = queue_info.get('pending', '')
+                                        if pending and str(pending).lower() == 'pending':
+                                            confirm_required = True
+                                            confirm_reason = f"countdown={countdown}, pending='{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                    
+                    # ============================================================
+                    # METHOD 9: Check is_confirm_required attribute
+                    # ============================================================
+                    if not confirm_required and hasattr(aternos_server, 'is_confirm_required'):
+                        try:
+                            is_confirm = aternos_server.is_confirm_required
+                            if is_confirm:
+                                confirm_required = True
+                                confirm_reason = "is_confirm_required=True"
+                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                        except:
+                            pass
+                    
+                    # ============================================================
+                    # METHOD 10: Check all server attributes for confirmation indicators
+                    # ============================================================
+                    if not confirm_required:
+                        # Check all non-private attributes
+                        for attr_name in dir(aternos_server):
+                            if not attr_name.startswith('_') and not callable(getattr(aternos_server, attr_name, None)):
+                                try:
+                                    attr_value = getattr(aternos_server, attr_name)
+                                    if attr_value and isinstance(attr_value, str):
+                                        attr_lower = attr_value.lower()
+                                        # Look for confirm/pending in attribute values
+                                        if ('confirm' in attr_lower or 'pending' in attr_lower) and 'waiting' not in attr_lower:
+                                            # Check if this is a meaningful attribute
+                                            if attr_name in ['status_text', 'message', 'action', 'button_text', 'label_text']:
+                                                confirm_required = True
+                                                confirm_reason = f"{attr_name}='{attr_value}'"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                                break
+                                except:
+                                    pass
+                    
+                    # ============================================================
+                    # METHOD 11: Final check - if position is 1 and status is not waiting
+                    # ============================================================
+                    if not confirm_required and hasattr(aternos_server, '_info'):
+                        info_data = getattr(aternos_server, '_info')
+                        if isinstance(info_data, dict) and 'queue' in info_data:
+                            queue_info = info_data.get('queue', {})
+                            if isinstance(queue_info, dict):
+                                position = queue_info.get('position', None)
+                                pending = queue_info.get('pending', '')
+                                
+                                # Check if queue finished (position 1) or has pending status
+                                if position is not None and position == 1:
+                                    # Position 1 means queue finished - needs confirmation even if status is "waiting"
+                                    if hasattr(aternos_server, 'confirm'):
+                                        confirm_required = True
+                                        confirm_reason = f"position=1 (queue finished), status={current_status}, confirm() method available"
+                                        print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                # Also check for pending status even if position is not 1
+                                elif pending and str(pending).lower() == 'pending':
+                                    # Pending status means confirmation needed
+                                    confirm_required = True
+                                    confirm_reason = f"queue pending='{pending}', status={current_status}"
+                                    print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                    
+                    # ============================================================
+                    # FINAL ACTION: Auto-confirm when detected (NO MANUAL CONFIRMATION NEEDED)
+                    # ============================================================
+                    if confirm_required:
+                        print(f"🚨🚨🚨 CONFIRMATION REQUIRED - REASON: {confirm_reason} 🚨🚨🚨")
+                        
+                        # Try to confirm IMMEDIATELY and automatically (multiple attempts with retries)
+                        print("🚀 Attempting AUTOMATIC confirmation (no manual interaction needed)...")
+                        auto_confirm_success = False
+                        max_retries = 3
+                        
+                        for retry in range(max_retries):
+                            try:
+                                # Refresh server status before confirming
+                                aternos_server.fetch()
+                                
+                                if hasattr(aternos_server, 'atconn'):
+                                    atconn = aternos_server.atconn
+                                    
+                                    # Method 1: Try request_cloudflare (most reliable)
+                                    if hasattr(atconn, 'request_cloudflare'):
+                                        try:
+                                            confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying GET request...")
+                                            response = atconn.request_cloudflare(confirm_url, 'GET')
+                                            if response is not None:
+                                                auto_confirm_success = True
+                                                print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (GET)!")
+                                                break
+                                        except Exception as get_err:
+                                            error_str = str(get_err)
+                                            print(f"   GET failed: {get_err}, trying POST...")
+                                            try:
+                                                response = atconn.request_cloudflare(confirm_url, 'POST')
+                                                if response is not None:
+                                                    auto_confirm_success = True
+                                                    print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (POST)!")
+                                                    break
+                                            except Exception as post_err:
+                                                print(f"   POST also failed: {post_err}")
+                                                if retry < max_retries - 1:
+                                                    print(f"   Retrying in 2 seconds...")
+                                                    await asyncio.sleep(2)
+                                    
+                                    # Method 2: Try library confirm() method
+                                    if not auto_confirm_success and hasattr(aternos_server, 'confirm'):
+                                        try:
+                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method...")
+                                            aternos_server.confirm()
+                                            auto_confirm_success = True
+                                            print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (library method)!")
+                                            break
+                                        except Exception as lib_err:
+                                            print(f"   Library confirm() failed: {lib_err}")
+                                            if retry < max_retries - 1:
+                                                print(f"   Retrying in 2 seconds...")
+                                                await asyncio.sleep(2)
+                                else:
+                                    # No atconn, try library method directly
+                                    if hasattr(aternos_server, 'confirm'):
+                                        try:
+                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method (no atconn)...")
+                                            aternos_server.confirm()
+                                            auto_confirm_success = True
+                                            print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (library method)!")
+                                            break
+                                        except Exception as lib_err:
+                                            print(f"   Library confirm() failed: {lib_err}")
+                                            if retry < max_retries - 1:
+                                                print(f"   Retrying in 2 seconds...")
+                                                await asyncio.sleep(2)
+                                
+                                # If we got here and didn't succeed, wait before retry
+                                if not auto_confirm_success and retry < max_retries - 1:
+                                    await asyncio.sleep(2)
+                                    
+                            except Exception as confirm_error:
+                                print(f"   Error in auto-confirm attempt {retry + 1}: {confirm_error}")
+                                if retry < max_retries - 1:
+                                    await asyncio.sleep(2)
+                        
+                        if auto_confirm_success:
+                            # Confirmation successful - update message and continue monitoring
+                            await loading_msg.edit(content='✅ **Confirmation sent automatically!**\n⏳ Server is starting...\n\n_No manual confirmation needed!_')
+                            # Continue monitoring to see server go online
+                            await asyncio.sleep(2)
+                            continue
+                        else:
+                            # All auto-confirm attempts failed - still try to continue, but log the issue
+                            print("⚠️⚠️⚠️ All auto-confirmation attempts failed, but continuing to monitor...")
+                            await loading_msg.edit(content='⚠️ **Confirmation required but auto-confirm failed**\n⏳ Retrying automatically...')
+                            # Wait a bit and continue monitoring - might succeed on next iteration
+                            await asyncio.sleep(3)
+                            continue
+                except Exception as e:
+                    print(f"Error checking confirmation: {e}")
+                
+                # Check for queue - Try different approaches
+                queue_position = None
+                queue_time = None
+                queue_time_str = None
+                in_queue = False
+                
+                # Approach 0: Check _info first (most reliable - contains queue data directly)
+                try:
+                    if hasattr(aternos_server, '_info'):
+                        info_data = getattr(aternos_server, '_info')
+                        if isinstance(info_data, dict) and 'queue' in info_data:
+                            queue_info = info_data['queue']
+                            if isinstance(queue_info, dict):
+                                # Extract position and count
+                                if 'position' in queue_info and 'count' in queue_info:
+                                    pos = queue_info['position']
+                                    count = queue_info['count']
+                                    queue_position = f"{pos} / {count}"
+                                    print(f"Found queue position in _info: {queue_position}")
+                                
+                                # Extract time (already in "ca. X min" format) - LOCK IT IN ONCE, NEVER UPDATE
+                                if 'time' in queue_info:
+                                    new_time_str = queue_info['time']
+                                    # ONLY set static value if it's not set yet - NEVER UPDATE IT AFTER THAT
+                                    if static_queue_time_str is None:
+                                        static_queue_time_str = new_time_str
+                                        print(f"🔒 LOCKED static queue time: {static_queue_time_str} (will never change)")
+                                    # Always use the locked static value - ignore any new values from _info
+                                    queue_time_str = static_queue_time_str
+                                    # Also set queue_time for compatibility (convert to seconds)
+                                    if 'minutes' in queue_info:
+                                        queue_time = queue_info['minutes'] * 60
+                                
+                                in_queue = True
+                                print(f"Queue data from _info: position={queue_position}, time={queue_time_str}")
+                except Exception as e:
+                    print(f"Error checking _info data: {e}")
+                
+                # Approach 1: Check status - "waiting" means in queue!
+                if current_status in ['loading', 'loading_preparing', 'waiting', 'queue'] or 'queue' in str(current_status).lower():
+                    in_queue = True
+                
+                # Approach 2: Check queue attribute
+                try:
+                    if hasattr(aternos_server, 'queue') and aternos_server.queue is not None:
+                        in_queue = True
+                        queue_obj = aternos_server.queue
+                        
+                        # Try different attribute names for position
+                        for attr in ['position', 'pos', 'place', 'number']:
+                            if hasattr(queue_obj, attr):
+                                val = getattr(queue_obj, attr)
+                                if val is not None:
+                                    queue_position = val
+                                    break
+                        
+                        # Try different attribute names for time
+                        for attr in ['time', 'wait', 'estimated', 'estimate', 'eta']:
+                            if hasattr(queue_obj, attr):
+                                val = getattr(queue_obj, attr)
+                                if val is not None:
+                                    queue_time = val
+                                    break
+                        
+                        if queue_position or queue_time:
+                            print(f"Queue from attribute - Position: {queue_position}, Time: {queue_time}")
+                except Exception as e:
+                    print(f"Error checking queue attribute: {e}")
+                
+                # Approach 3: Check for queue_position directly on server
+                try:
+                    if hasattr(aternos_server, 'queue_position'):
+                        queue_position = aternos_server.queue_position
+                        in_queue = True
+                except:
+                    pass
+                
+                # Approach 4: Check for queue_time directly
+                try:
+                    if hasattr(aternos_server, 'queue_time'):
+                        queue_time = aternos_server.queue_time
+                        in_queue = True
+                except:
+                    pass
+                
+                # Approach 5: Try to get queue info from atserver methods
+                try:
+                    # Some versions use atserver.get_queue()
+                    if hasattr(aternos_server, 'get_queue'):
+                        queue_info = aternos_server.get_queue()
+                        if queue_info:
+                            print(f"Queue from get_queue(): {queue_info}")
+                            in_queue = True
+                except:
+                    pass
+                
+                # Approach 6: Check for loading/waiting attributes
+                try:
+                    if hasattr(aternos_server, 'loading') and aternos_server.loading:
+                        in_queue = True
+                except:
+                    pass
+                
+                # Approach 7: Try to get queue info from atconn (connection object) - Direct API call
+                try:
+                    if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
+                        atconn = aternos_server.atconn
+                        server_id = aternos_server.servid
+                        
+                        # Try multiple methods to get queue data
+                        # Method 1: Using session.get() if available (could be requests or aiohttp)
+                        if hasattr(atconn, 'session'):
+                            try:
+                                queue_url = f'https://aternos.org/panel/ajax/queue.php?id={server_id}'
+                                print(f"Trying to fetch queue data from: {queue_url}")
+                                
+                                session = atconn.session
+                                
+                                # Check if it's aiohttp session (async) or requests session (sync)
+                                import aiohttp
+                                import requests
+                                
+                                if isinstance(session, aiohttp.ClientSession):
+                                    # Async aiohttp session
+                                    async with session.get(queue_url) as response:
+                                        if response.status == 200:
+                                            try:
+                                                queue_data = await response.json()
+                                                print(f"Queue API response (JSON): {queue_data}")
+                                                
+                                                if isinstance(queue_data, dict):
+                                                    # Try different possible keys for position
+                                                    for pos_key in ['position', 'pos', 'queue_pos', 'queue_position', 'current', 'now']:
+                                                        if pos_key in queue_data:
+                                                            pos_val = queue_data[pos_key]
+                                                            if isinstance(pos_val, (int, str)) and str(pos_val).isdigit():
+                                                                queue_position = int(pos_val)
+                                                                print(f"Found queue position in API ({pos_key}): {queue_position}")
+                                                                break
+                                                    
+                                                    # Try different possible keys for max position
+                                                    for max_key in ['max', 'max_position', 'total', 'queue_max', 'max_queue']:
+                                                        if max_key in queue_data:
+                                                            max_val = queue_data[max_key]
+                                                            if isinstance(max_val, (int, str)) and str(max_val).isdigit():
+                                                                if queue_position is not None:
+                                                                    queue_position = f"{queue_position}/{max_val}"
+                                                                print(f"Found queue max in API ({max_key}): {max_val}")
+                                                                break
+                                                    
+                                                    # Try different possible keys for time
+                                                    for time_key in ['time', 'wait', 'eta', 'estimated', 'estimate', 'wait_time', 'queue_time']:
+                                                        if time_key in queue_data:
+                                                            time_val = queue_data[time_key]
+                                                            if isinstance(time_val, (int, float)):
+                                                                queue_time = int(time_val)
+                                                                print(f"Found queue time in API ({time_key}): {queue_time}")
+                                                                break
+                                                            elif isinstance(time_val, str):
+                                                                # Try to parse time string like "8 min" or "480"
+                                                                import re
+                                                                numbers = re.findall(r'\d+', time_val)
+                                                                if numbers:
+                                                                    num = int(numbers[0])
+                                                                    if 'min' in time_val.lower():
+                                                                        queue_time = num * 60
+                                                                    else:
+                                                                        queue_time = num
+                                                                    print(f"Found queue time in API (parsed from '{time_key}'): {queue_time}")
+                                                                    break
+                                                    
+                                                    in_queue = True
+                                            except Exception as json_e:
+                                                # Try text response
+                                                text_data = await response.text()
+                                                print(f"Queue API response (text): {text_data}")
+                                        elif response.status == 503:
+                                            # Service Unavailable - don't spam console, just skip this fetch
+                                            pass  # Silently skip 503 errors
+                                        else:
+                                            # Only log non-503 errors
+                                            if response.status != 503:
+                                                print(f"Queue API returned status: {response.status}")
+                                elif isinstance(session, requests.Session):
+                                    # Sync requests session - run in executor to avoid blocking
+                                    import asyncio
+                                    loop = asyncio.get_event_loop()
+                                    response = await loop.run_in_executor(None, session.get, queue_url)
+                                    if response.status_code == 200:
+                                        try:
+                                            queue_data = response.json()
+                                            print(f"Queue API response (JSON): {queue_data}")
+                                            
+                                            if isinstance(queue_data, dict):
+                                                # Same parsing logic as above
+                                                for pos_key in ['position', 'pos', 'queue_pos', 'queue_position', 'current', 'now']:
+                                                    if pos_key in queue_data:
+                                                        pos_val = queue_data[pos_key]
+                                                        if isinstance(pos_val, (int, str)) and str(pos_val).isdigit():
+                                                            queue_position = int(pos_val)
+                                                            print(f"Found queue position in API ({pos_key}): {queue_position}")
+                                                            break
+                                                
+                                                for max_key in ['max', 'max_position', 'total', 'queue_max', 'max_queue']:
+                                                    if max_key in queue_data:
+                                                        max_val = queue_data[max_key]
+                                                        if isinstance(max_val, (int, str)) and str(max_val).isdigit():
+                                                            if queue_position is not None:
+                                                                queue_position = f"{queue_position}/{max_val}"
+                                                            print(f"Found queue max in API ({max_key}): {max_val}")
+                                                            break
+                                                
+                                                for time_key in ['time', 'wait', 'eta', 'estimated', 'estimate', 'wait_time', 'queue_time']:
+                                                    if time_key in queue_data:
+                                                        time_val = queue_data[time_key]
+                                                        if isinstance(time_val, (int, float)):
+                                                            queue_time = int(time_val)
+                                                            print(f"Found queue time in API ({time_key}): {queue_time}")
+                                                            break
+                                                        elif isinstance(time_val, str):
+                                                            import re
+                                                            numbers = re.findall(r'\d+', time_val)
+                                                            if numbers:
+                                                                num = int(numbers[0])
+                                                                if 'min' in time_val.lower():
+                                                                    queue_time = num * 60
+                                                                else:
+                                                                    queue_time = num
+                                                                print(f"Found queue time in API (parsed from '{time_key}'): {queue_time}")
+                                                                break
+                                                
+                                                in_queue = True
+                                        except Exception as json_e:
+                                            text_data = response.text
+                                            print(f"Queue API response (text): {text_data}")
+                                    elif response.status_code == 503:
+                                        # Service Unavailable - don't spam console, just skip this fetch
+                                        pass  # Silently skip 503 errors
+                                    else:
+                                        # Only log non-503 errors
+                                        if response.status_code != 503:
+                                            print(f"Queue API returned status: {response.status_code}")
+                            except Exception as e:
+                                print(f"Error fetching queue API with session: {e}")
+                        
+                        # Method 2: Using request_cloudflare if available
+                        if queue_position is None and hasattr(atconn, 'request_cloudflare'):
+                            try:
+                                queue_url = f'https://aternos.org/panel/ajax/queue.php?id={server_id}'
+                                print(f"Trying request_cloudflare for queue data: {queue_url}")
+                                
+                                response = atconn.request_cloudflare(queue_url, 'GET')
+                                print(f"Queue API response (cloudflare): {response}")
+                                
+                                if response:
+                                    if isinstance(response, dict):
+                                        # Extract queue position and time
+                                        for pos_key in ['position', 'pos', 'queue_pos']:
+                                            if pos_key in response:
+                                                queue_position = response[pos_key]
+                                                print(f"Found queue position in API ({pos_key}): {queue_position}")
+                                                break
+                                        
+                                        for time_key in ['time', 'wait', 'eta']:
+                                            if time_key in response:
+                                                queue_time = response[time_key]
+                                                print(f"Found queue time in API ({time_key}): {queue_time}")
+                                                break
+                                        
+                                        in_queue = True
+                                    elif isinstance(response, str):
+                                        # Try to parse HTML or text response
+                                        import re
+                                        # Look for position pattern like "3573 / 3852" or "3573/3852"
+                                        pos_match = re.search(r'(\d+)\s*[/]\s*(\d+)', response)
+                                        if pos_match:
+                                            queue_position = f"{pos_match.group(1)}/{pos_match.group(2)}"
+                                            print(f"Found queue position in text: {queue_position}")
+                                        
+                                        # Look for time pattern like "ca. 8 min" or "8 min"
+                                        time_match = re.search(r'(\d+)\s*min', response, re.IGNORECASE)
+                                        if time_match:
+                                            queue_time = int(time_match.group(1)) * 60
+                                            print(f"Found queue time in text: {queue_time}")
+                                        
+                                        if queue_position or queue_time:
+                                            in_queue = True
+                            except Exception as e:
+                                error_str = str(e)
+                                # Don't spam console with 503 errors
+                                if '503' not in error_str and 'Service Unavailable' not in error_str:
+                                    print(f"Error fetching queue API with request_cloudflare: {e}")
+                except Exception as e:
+                    print(f"Error with atconn approach: {e}")
+                
+                # If in queue - check status first to ensure "waiting" is always treated as queue
+                if current_status == 'waiting':
+                    in_queue = True
+                    
+                    # IMPORTANT: Check if queue has finished and needs confirmation (even while status is "waiting")
+                    # This handles the case where server is "waiting" but queue finished and needs confirmation
+                    if hasattr(aternos_server, '_info'):
+                        info_data = getattr(aternos_server, '_info')
+                        if isinstance(info_data, dict) and 'queue' in info_data:
+                            queue_info = info_data.get('queue', {})
+                            if isinstance(queue_info, dict):
+                                position = queue_info.get('position', None)
+                                pending = queue_info.get('pending', '')
+                                
+                                # If position is 1 or pending status, queue finished - try to confirm automatically
+                                if (position is not None and position == 1) or (pending and str(pending).lower() == 'pending'):
+                                    print(f"🔍 Queue finished while in 'waiting' status! Position: {position}, Pending: {pending}")
+                                    print("🚀 Attempting automatic confirmation...")
+                                    
+                                    try:
+                                        # Try to confirm automatically
+                                        if hasattr(aternos_server, 'atconn'):
+                                            atconn = aternos_server.atconn
+                                            if hasattr(atconn, 'request_cloudflare'):
+                                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                                try:
+                                                    response = atconn.request_cloudflare(confirm_url, 'GET')
+                                                    if response is not None:
+                                                        print("✅✅✅ AUTO-CONFIRMED while in waiting status!")
+                                                        await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
+                                                        # Continue monitoring
+                                                        await asyncio.sleep(2)
+                                                        continue
+                                                except:
+                                                    try:
+                                                        response = atconn.request_cloudflare(confirm_url, 'POST')
+                                                        if response is not None:
+                                                            print("✅✅✅ AUTO-CONFIRMED while in waiting status (POST)!")
+                                                            await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
+                                                            await asyncio.sleep(2)
+                                                            continue
+                                                    except:
+                                                        pass
+                                        
+                                        # Fallback to library method
+                                        if hasattr(aternos_server, 'confirm'):
+                                            aternos_server.confirm()
+                                            print("✅✅✅ AUTO-CONFIRMED using library method!")
+                                            await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
+                                            await asyncio.sleep(2)
+                                            continue
+                                    except Exception as auto_confirm_err:
+                                        print(f"⚠️ Auto-confirm failed while waiting: {auto_confirm_err}")
+                                        # Continue with normal queue monitoring
+                    
+                    # Try to fetch queue data from panel page HTML (fetch every 3 seconds to avoid rate limiting)
+                    current_elapsed = int(time.time() - start_time)
+                    # Fetch on first iteration (0 seconds) and then every 3 seconds
+                    if current_elapsed == 0 or current_elapsed % 3 == 0:
+                        print(f"Fetching queue data (elapsed: {current_elapsed}s)")
+                        panel_queue_pos, panel_queue_time_str = await fetch_queue_data_from_panel(aternos_server)
+                        if panel_queue_pos:
+                            queue_position = panel_queue_pos
+                            last_queue_position = panel_queue_pos
+                            print(f"Updated queue position: {queue_position}")
+                        if panel_queue_time_str:
+                            last_queue_time_str = panel_queue_time_str
+                            print(f"Updated queue time: {panel_queue_time_str}")
+                        if not panel_queue_pos and not panel_queue_time_str:
+                            print("No queue data found from panel fetch")
+                
+                # If in queue, show queue message
+                if in_queue or current_status == 'waiting':
+                    # Update last known values
+                    if queue_time is not None:
+                        last_queue_time = queue_time
+                    if queue_position is not None:
+                        last_queue_position = queue_position
+                    if queue_time_str is not None:
+                        last_queue_time_str = queue_time_str
+                    elif 'last_queue_time_str' not in locals() or last_queue_time_str is None:
+                        last_queue_time_str = None
+                    
+                    elapsed = int(time.time() - start_time)
+                    elapsed_str = f'{elapsed // 60}m {elapsed % 60}s' if elapsed >= 60 else f'{elapsed}s'
+                    
+                    # Build the message based on available data
+                    message = '⏳ **Waiting in Queue**\n\n'
+                    
+                    # Add queue position if available
+                    if queue_position is not None:
+                        message += f'📊 **Queue Position:** {queue_position}\n'
+                    elif last_queue_position is not None:
+                        message += f'📊 **Queue Position:** {last_queue_position}\n'
+                    else:
+                        message += f'📊 **Queue Position:** Unknown\n'
+                    
+                    # Add estimated time - ALWAYS use static locked value (NEVER changes)
+                    if static_queue_time_str:
+                        # Use the LOCKED static "ca. X min" value (never changes, only elapsed time updates)
+                        message += f'⏱️ {static_queue_time_str}\n'
+                    elif queue_time_str:
+                        # First time only - lock it in
+                        if static_queue_time_str is None:
+                            static_queue_time_str = queue_time_str
+                            print(f"🔒 LOCKED static queue time from queue_time_str: {static_queue_time_str}")
+                        message += f'⏱️ {static_queue_time_str}\n'
+                    elif last_queue_time_str:
+                        # First time only - lock it in
+                        if static_queue_time_str is None:
+                            static_queue_time_str = last_queue_time_str
+                            print(f"🔒 LOCKED static queue time from last_queue_time_str: {static_queue_time_str}")
+                        message += f'⏱️ {static_queue_time_str}\n'
+                    elif queue_time is not None:
+                        # First time only - lock it in
+                        if static_queue_time_str is None:
+                            est_minutes = int(queue_time / 60)
+                            static_queue_time_str = f"ca. {est_minutes} min"
+                            print(f"🔒 LOCKED static queue time from queue_time: {static_queue_time_str}")
+                        message += f'⏱️ {static_queue_time_str}\n'
+                    elif last_queue_time is not None:
+                        # First time only - lock it in
+                        if static_queue_time_str is None:
+                            est_minutes = int(last_queue_time / 60)
+                            static_queue_time_str = f"ca. {est_minutes} min"
+                            print(f"🔒 LOCKED static queue time from last_queue_time: {static_queue_time_str}")
+                        message += f'⏱️ {static_queue_time_str}\n'
+                    else:
+                        # Check if countdown is available - first time only
+                        if static_queue_time_str is None:
+                            countdown = getattr(aternos_server, 'countdown', -1)
+                            if countdown >= 0:
+                                countdown_min = int(countdown / 60)
+                                static_queue_time_str = f"ca. {countdown_min} min"
+                                print(f"🔒 LOCKED static queue time from countdown: {static_queue_time_str}")
+                        
+                        if static_queue_time_str:
+                            message += f'⏱️ {static_queue_time_str}\n'
+                        else:
+                            message += f'⏱️ **ca.** Calculating...\n'
+                    
+                    message += f'🕐 **Elapsed:** {elapsed_str}\n'
+                    message += f'📡 **Status:** {current_status.upper()}'
+                    
+                    await loading_msg.edit(content=message)
+                    
+                    # Wait 1 second before next update
+                    await asyncio.sleep(1)
+                    continue
+                
+                # Check if server is online
+                if current_status == 'online':
+                    if str(guild_id) in queue_monitoring_tasks:
+                        del queue_monitoring_tasks[str(guild_id)]
+                    
+                    await loading_msg.edit(content=f'✅ **Server Started!**\n🟢 **Status:** ONLINE\n\n_Server is ready to use!_')
+                    return
+                
+                # Check if starting
+                if current_status == 'starting':
+                    elapsed = int(time.time() - start_time)
+                    elapsed_str = f'{elapsed // 60}m {elapsed % 60}s' if elapsed >= 60 else f'{elapsed}s'
+                    
+                    await loading_msg.edit(
+                        content=f'⏳ **Loading... Preparing server...**\n🟡 **Status:** STARTING\n'
+                                f'🕐 **Elapsed:** {elapsed_str}\n\n_Please wait, server is starting up..._'
+                    )
+                    await asyncio.sleep(2)
+                    continue
+                
+                # For other statuses, wait a bit longer
+                await asyncio.sleep(2)
+                
+            except discord.errors.NotFound:
+                # Message was deleted
+                if str(guild_id) in queue_monitoring_tasks:
+                    del queue_monitoring_tasks[str(guild_id)]
+                return
+            except Exception as e:
+                print(f'Error in queue monitoring loop: {e}')
+                await asyncio.sleep(2)
+                
+    except asyncio.CancelledError:
+        # Task was cancelled
+        if str(guild_id) in queue_monitoring_tasks:
+            del queue_monitoring_tasks[str(guild_id)]
+        return
+    except Exception as e:
+        print(f'Error in monitor_queue: {e}')
+        if str(guild_id) in queue_monitoring_tasks:
+            del queue_monitoring_tasks[str(guild_id)]
+
 @bot.command(name='start')
 async def start_server(ctx):
     """Start the Aternos server"""
@@ -300,43 +1973,13 @@ async def start_server(ctx):
         # Wait a moment for status to update
         await asyncio.sleep(3)
         
-        # Keep checking status until online or timeout (max 5 minutes = 60 checks * 5 seconds)
-        max_checks = 60
-        check_count = 0
+        # Cancel any existing queue monitoring task for this guild
+        if str(ctx.guild.id) in queue_monitoring_tasks:
+            queue_monitoring_tasks[str(ctx.guild.id)].cancel()
         
-        while check_count < max_checks:
-            # Refresh server status
-            aternos_server.fetch()
-            current_status = aternos_server.status
-            
-            status_emoji = {
-                'online': '🟢',
-                'offline': '🔴',
-                'starting': '🟡',
-                'stopping': '🟠'
-            }.get(current_status, '⚪')
-            
-            # If server is online, update message and break
-            if current_status == 'online':
-                await loading_msg.edit(content=f'✅ **Server Started!**\n{status_emoji} **Status:** ONLINE\n\n_Server is ready to use!_')
-                return
-            
-            # Update message with current status
-            if current_status == 'starting':
-                await loading_msg.edit(content=f'⏳ **Loading... Preparing server...**\n{status_emoji} **Status:** STARTING\n\n_Please wait, server is starting up..._')
-            else:
-                status_text = current_status.upper() if current_status else 'UNKNOWN'
-                await loading_msg.edit(content=f'⏳ **Loading... Preparing server...**\n{status_emoji} **Status:** {status_text}\n\n_Waiting for server to start..._')
-            
-            # Wait 5 seconds before next check
-            await asyncio.sleep(5)
-            check_count += 1
-        
-        # If we reach here, server didn't come online in time
-        aternos_server.fetch()
-        final_status = aternos_server.status
-        if final_status != 'online':
-            await loading_msg.edit(content=f'⏳ **Server is still starting...**\n🟡 **Status:** {final_status.upper() if final_status else "STARTING"}\n\n_It may take a few more minutes. Use !status to check again._')
+        # Start queue monitoring task
+        task = asyncio.create_task(monitor_queue(ctx, loading_msg, aternos_server, ctx.guild.id))
+        queue_monitoring_tasks[str(ctx.guild.id)] = task
         
     except Exception as e:
         await ctx.send(f'❌ Error starting server: {str(e)}')
@@ -425,6 +2068,416 @@ async def server_status(ctx):
     except Exception as e:
         await ctx.send(f'❌ Error getting server status: {e}')
 
+@bot.command(name='autostart')
+async def auto_start_toggle(ctx, action: str = None):
+    """Enable or disable 24/7 auto-start (keeps server online automatically)"""
+    if not action:
+        # Show current status
+        is_enabled = get_auto_start_enabled(ctx.guild.id)
+        status_text = "🟢 **ENABLED**" if is_enabled else "🔴 **DISABLED**"
+        await ctx.send(
+            f'**24/7 Auto-Start Status:** {status_text}\n\n'
+            f'**Usage:**\n'
+            f'`!autostart enable` - Enable 24/7 auto-start\n'
+            f'`!autostart disable` - Disable 24/7 auto-start\n\n'
+            f'_When enabled, the bot will automatically start the server if it goes offline._'
+        )
+        return
+    
+    action_lower = action.lower()
+    
+    if action_lower == 'enable':
+        # Check if server is configured
+        aternos_server = server_servers.get(str(ctx.guild.id))
+        if not aternos_server:
+            await ctx.send('❌ Server not configured. Please set up your Aternos credentials in the `server-setup` channel using `!username` and `!password` commands.')
+            return
+        
+        # Enable auto-start
+        set_auto_start_enabled(ctx.guild.id, True)
+        
+        # Start monitoring task if not already running
+        if str(ctx.guild.id) not in auto_start_tasks:
+            task = asyncio.create_task(monitor_auto_start(ctx.guild.id))
+            auto_start_tasks[str(ctx.guild.id)] = task
+            print(f'✅ Auto-start monitoring started for guild {ctx.guild.id}')
+        
+        await ctx.send(
+            '✅ **24/7 Auto-Start ENABLED!**\n\n'
+            '🔄 The bot will now automatically start your server if it goes offline.\n'
+            '⏱️ Checking every 5 seconds...\n\n'
+            '_Use `!autostart disable` to turn this off._'
+        )
+        
+    elif action_lower == 'disable':
+        # Disable auto-start
+        set_auto_start_enabled(ctx.guild.id, False)
+        
+        # Stop monitoring task if running
+        if str(ctx.guild.id) in auto_start_tasks:
+            task = auto_start_tasks[str(ctx.guild.id)]
+            task.cancel()
+            del auto_start_tasks[str(ctx.guild.id)]
+            print(f'⏸️ Auto-start monitoring stopped for guild {ctx.guild.id}')
+        
+        await ctx.send(
+            '⏸️ **24/7 Auto-Start DISABLED**\n\n'
+            '_The bot will no longer automatically start your server._\n'
+            '_Use `!autostart enable` to turn it back on._'
+        )
+    else:
+        await ctx.send(
+            '❌ Invalid action. Use:\n'
+            '`!autostart enable` - Enable 24/7 auto-start\n'
+            '`!autostart disable` - Disable 24/7 auto-start'
+        )
+
+@bot.command(name='debug')
+async def debug_server(ctx):
+    """Debug command to see all server attributes"""
+    # Get server-specific Aternos server
+    aternos_server = server_servers.get(str(ctx.guild.id))
+    
+    if not aternos_server:
+        await ctx.send('❌ Server not configured.')
+        return
+    
+    try:
+        # Refresh server info
+        aternos_server.fetch()
+        
+        debug_info = f"**Debug Information:**\n\n"
+        debug_info += f"**Status:** `{aternos_server.status}`\n"
+        
+        # Check all possible queue-related attributes
+        debug_info += f"\n**Queue Detection:**\n"
+        debug_info += f"Has 'queue' attr: {hasattr(aternos_server, 'queue')}\n"
+        
+        if hasattr(aternos_server, 'queue') and aternos_server.queue:
+            queue_obj = aternos_server.queue
+            debug_info += f"Queue object type: {type(queue_obj)}\n"
+            if hasattr(queue_obj, 'position'):
+                debug_info += f"Queue position: {queue_obj.position}\n"
+            if hasattr(queue_obj, 'time'):
+                debug_info += f"Queue time: {queue_obj.time}\n"
+        
+        # Check other queue attributes
+        queue_attrs = ['queue_position', 'queue_time', 'loading', 'waiting']
+        for attr in queue_attrs:
+            if hasattr(aternos_server, attr):
+                debug_info += f"{attr}: {getattr(aternos_server, attr)}\n"
+        
+        # Check for confirmation
+        debug_info += f"\n**Confirmation:**\n"
+        debug_info += f"Has 'is_confirm_required': {hasattr(aternos_server, 'is_confirm_required')}\n"
+        if hasattr(aternos_server, 'is_confirm_required'):
+            debug_info += f"Confirm required: {aternos_server.is_confirm_required}\n"
+        
+        # List some important attributes
+        debug_info += f"\n**Key Attributes:**\n"
+        attrs = ['address', 'status', 'players_count', 'software', 'version']
+        for attr in attrs:
+            if hasattr(aternos_server, attr):
+                debug_info += f"{attr}: {getattr(aternos_server, attr)}\n"
+        
+        # Check if there are any methods that might give queue info
+        debug_info += f"\n**Available Methods:**\n"
+        methods = [m for m in dir(aternos_server) if callable(getattr(aternos_server, m)) and not m.startswith('_')]
+        queue_methods = [m for m in methods if 'queue' in m.lower() or 'wait' in m.lower() or 'confirm' in m.lower()]
+        if queue_methods:
+            debug_info += f"Relevant methods: {', '.join(queue_methods)}\n"
+        
+        # Show ALL non-private, non-callable attributes with values
+        debug_info += f"\n**All Attributes:**\n```\n"
+        for attr in dir(aternos_server):
+            if not attr.startswith('_') and not callable(getattr(aternos_server, attr)):
+                try:
+                    value = getattr(aternos_server, attr)
+                    debug_info += f"{attr}: {value}\n"
+                except:
+                    pass
+        debug_info += "```"
+        
+        # Split message if too long
+        if len(debug_info) > 2000:
+            # Send in chunks
+            chunks = [debug_info[i:i+1900] for i in range(0, len(debug_info), 1900)]
+            for chunk in chunks:
+                await ctx.send(chunk)
+        else:
+            await ctx.send(debug_info)
+        
+    except Exception as e:
+        await ctx.send(f'❌ Error: {e}')
+
+@bot.command(name='confirm')
+async def confirm_start(ctx):
+    """Manually confirm server start if confirmation is required - Works same as button"""
+    aternos_server = server_servers.get(str(ctx.guild.id))
+    
+    if not aternos_server:
+        await ctx.send('❌ Server not configured.')
+        return
+    
+    try:
+        # Refresh server status first
+        aternos_server.fetch()
+        current_status = aternos_server.status
+        
+        # Check if confirmation is actually needed
+        needs_confirm = False
+        if hasattr(aternos_server, '_info'):
+            info_data = getattr(aternos_server, '_info')
+            if isinstance(info_data, dict) and 'queue' in info_data:
+                queue_info = info_data.get('queue', {})
+                if isinstance(queue_info, dict):
+                    pending = queue_info.get('pending', '')
+                    if pending and str(pending).lower() == 'pending':
+                        needs_confirm = True
+        
+        # Also check css_class
+        if not needs_confirm and hasattr(aternos_server, 'css_class'):
+            css_class = str(aternos_server.css_class).lower()
+            if 'pending' in css_class or 'confirm' in css_class:
+                if 'queueing' not in css_class:
+                    needs_confirm = True
+        
+        # Try to confirm
+        if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
+            confirm_msg = await ctx.send('⏳ Sending confirmation to Aternos...')
+            
+            try:
+                # ============================================================
+                # EXTENSIVE DEBUGGING BEFORE CONFIRMATION (COMMAND)
+                # ============================================================
+                print("=" * 60)
+                print("🔍 !CONFIRM COMMAND - DEBUGGING")
+                print("=" * 60)
+                
+                # Refresh server status first
+                print("1. Refreshing server status...")
+                aternos_server.fetch()
+                current_status = aternos_server.status
+                print(f"   Status after fetch: {current_status}")
+                
+                # Check _info for confirmation status
+                print("2. Checking _info for confirmation requirements...")
+                if hasattr(aternos_server, '_info'):
+                    info_data = getattr(aternos_server, '_info')
+                    if isinstance(info_data, dict):
+                        print(f"   _info keys: {list(info_data.keys())}")
+                        if 'queue' in info_data:
+                            queue_info = info_data.get('queue', {})
+                            if isinstance(queue_info, dict):
+                                pending = queue_info.get('pending', '')
+                                position = queue_info.get('position', None)
+                                print(f"   Queue pending: '{pending}', position: {position}")
+                
+                # Check css_class
+                print("3. Checking css_class...")
+                css_class = getattr(aternos_server, 'css_class', 'N/A')
+                print(f"   css_class: '{css_class}'")
+                
+                # Check if confirm method exists
+                print("4. Checking confirm() method...")
+                has_confirm = hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm)
+                print(f"   Has confirm method: {has_confirm}")
+                
+                # Check connection
+                print("5. Checking connection...")
+                if hasattr(aternos_server, 'atconn'):
+                    atconn = aternos_server.atconn
+                    print(f"   Has atconn: True")
+                    if hasattr(atconn, 'session'):
+                        print(f"   Has session: True")
+                
+                print("6. Server attributes before confirm:")
+                print(f"   status: {current_status}")
+                print(f"   css_class: {css_class}")
+                print("=" * 60)
+                
+                # Try to refresh connection/token if possible
+                print("7. Attempting to refresh connection...")
+                try:
+                    # Re-fetch to get fresh token
+                    aternos_server.fetch()
+                    print("   ✅ Server status refreshed")
+                except Exception as refresh_error:
+                    print(f"   ⚠️ Could not refresh: {refresh_error}")
+                
+                # FORCE RE-AUTHENTICATION before confirming to get fresh token
+                print("8. Force re-authenticating with Aternos to get fresh token...")
+                try:
+                    if await connect_to_aternos(ctx.guild.id):
+                        aternos_server = server_servers.get(str(ctx.guild.id))
+                        if aternos_server:
+                            aternos_server.fetch()
+                            print("   ✅ Re-authenticated and refreshed server")
+                        else:
+                            print("   ⚠️ Re-authenticated but server not found")
+                    else:
+                        print("   ⚠️ Re-authentication failed, continuing with existing connection")
+                except Exception as reauth_error:
+                    print(f"   ⚠️ Re-authentication error (non-critical): {reauth_error}")
+                
+                # Send confirmation to Aternos - Try multiple methods (same as button)
+                print("9. Attempting to confirm server start...")
+                confirm_success = False
+                last_error = None
+                
+                try:
+                    # Get the connection
+                    if hasattr(aternos_server, 'atconn'):
+                        atconn = aternos_server.atconn
+                        server_id = aternos_server.servid
+                        
+                        # Method 1: Use request_cloudflare (most reliable for Aternos)
+                        if hasattr(atconn, 'request_cloudflare'):
+                            try:
+                                print("   Trying request_cloudflare method...")
+                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                response = atconn.request_cloudflare(confirm_url, 'GET')
+                                print(f"   request_cloudflare response: {response}")
+                                
+                                if response:
+                                    if isinstance(response, dict):
+                                        if response.get('status') == 'success' or 'success' in str(response).lower():
+                                            confirm_success = True
+                                            print("   ✅ Confirm successful via request_cloudflare")
+                                    elif isinstance(response, str):
+                                        if 'success' in response.lower() or 'ok' in response.lower():
+                                            confirm_success = True
+                                            print("   ✅ Confirm successful via request_cloudflare")
+                                    else:
+                                        confirm_success = True
+                                        print("   ✅ Confirm successful via request_cloudflare (got response)")
+                            except Exception as cf_error:
+                                print(f"   ⚠️ request_cloudflare failed: {cf_error}")
+                                last_error = cf_error
+                        
+                        # Method 2: Direct session call
+                        if not confirm_success and hasattr(atconn, 'session'):
+                            try:
+                                print("   Trying direct session call...")
+                                session = atconn.session
+                                import aiohttp
+                                import requests
+                                
+                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                
+                                if isinstance(session, aiohttp.ClientSession):
+                                    async with session.get(confirm_url) as response:
+                                        if response.status == 200:
+                                            result = await response.text()
+                                            print(f"   ✅ Direct session GET successful: {result}")
+                                            confirm_success = True
+                                elif isinstance(session, requests.Session):
+                                    import asyncio
+                                    loop = asyncio.get_event_loop()
+                                    response = await loop.run_in_executor(None, session.get, confirm_url)
+                                    if response.status_code == 200:
+                                        print(f"   ✅ Direct session GET successful: {response.text}")
+                                        confirm_success = True
+                            except Exception as session_error:
+                                print(f"   ⚠️ Direct session call failed: {session_error}")
+                                if not last_error:
+                                    last_error = session_error
+                        
+                        # Method 3: Library method as fallback
+                        if not confirm_success:
+                            try:
+                                print("   Trying library confirm() method as fallback...")
+                                aternos_server.confirm()
+                                print("   ✅ Library confirm() method called")
+                                confirm_success = True
+                            except Exception as lib_error:
+                                print(f"   ⚠️ Library confirm() failed: {lib_error}")
+                                if not last_error:
+                                    last_error = lib_error
+                    else:
+                        # No atconn, try library method
+                        print("   No atconn, trying library confirm() method...")
+                        aternos_server.confirm()
+                        print("   ✅ Library confirm() method called")
+                        confirm_success = True
+                        
+                except Exception as confirm_error:
+                    print(f"   ❌ All confirm methods failed")
+                    last_error = confirm_error
+                    import traceback
+                    traceback.print_exc()
+                
+                if not confirm_success:
+                    raise Exception(f"All confirmation methods failed. Last error: {last_error}")
+                
+                # Wait a moment for status to update
+                await asyncio.sleep(2)
+                
+                # Check status after confirmation
+                aternos_server.fetch()
+                new_status = aternos_server.status
+                
+                # Update message with success
+                await confirm_msg.edit(
+                    content=f'✅ **Confirmation sent!**\n'
+                           f'📡 **Server Status:** `{new_status}`\n'
+                           f'⏳ The server should start soon...'
+                )
+                
+                # If status is starting or online, send additional message
+                if new_status in ['starting', 'online']:
+                    await ctx.send('🎉 **Server is starting!** Please wait...')
+                elif needs_confirm:
+                    await ctx.send('✅ **Confirmation processed!** The server should start soon.')
+                    
+            except Exception as confirm_error:
+                error_msg = str(confirm_error)
+                print(f'❌❌❌ Error in confirm command: {confirm_error}')
+                import traceback
+                traceback.print_exc()
+                
+                # Try to re-authenticate if it's a 400/401 error
+                if '400' in error_msg or '401' in error_msg or 'Bad Request' in error_msg:
+                    print("🔄 Attempting to re-authenticate due to 400/401 error...")
+                    try:
+                        # Try to reconnect
+                        if await connect_to_aternos(ctx.guild.id):
+                            print("✅ Re-authenticated successfully")
+                            aternos_server = server_servers.get(str(ctx.guild.id))
+                            if aternos_server:
+                                aternos_server.fetch()
+                                # Try confirm again
+                                try:
+                                    aternos_server.confirm()
+                                    await confirm_msg.edit(
+                                        content=f'✅ **Confirmation sent!** (After re-authentication)\n'
+                                               f'📡 **Server Status:** `{aternos_server.status}`\n'
+                                               f'⏳ The server should start soon...'
+                                    )
+                                    return
+                                except Exception as retry_error:
+                                    print(f"❌ Confirm failed after re-auth: {retry_error}")
+                    except Exception as reconnect_error:
+                        print(f"❌ Re-authentication failed: {reconnect_error}")
+                
+                await confirm_msg.edit(
+                    content=f'❌ **Error confirming:** {error_msg}\n\n'
+                           f'**Possible causes:**\n'
+                           f'• Server might not need confirmation right now\n'
+                           f'• Token expired - try restarting the bot\n'
+                           f'• Server status changed\n\n'
+                           f'**Please check the server status on Aternos website.**'
+                )
+        else:
+            await ctx.send('❌ No confirmation method available.\n'
+                          'The server might not need confirmation right now, or it\'s already confirmed.')
+    except Exception as e:
+        error_msg = str(e)
+        print(f'Error in confirm command: {e}')
+        import traceback
+        traceback.print_exc()
+        await ctx.send(f'❌ **Error:** {error_msg}')
+
 @bot.command(name='invite')
 async def invite_link(ctx):
     """Get the bot invite link"""
@@ -457,17 +2510,65 @@ async def invite_link(ctx):
 # Run the bot
 if __name__ == '__main__':
     if not DISCORD_TOKEN:
-        print('❌ DISCORD_TOKEN not found in .env file!')
-    else:
-        print('\n' + '='*50)
-        print('🤖 Aternos Discord Bot Starting...')
-        print('='*50)
-        print(f'\n✅ Bot is ready!')
-        print(f'\n📋 To make bot public:')
-        print(f'   1. Go to: https://discord.com/developers/applications/1442827241892352073/bot')
-        print(f'   2. Enable "Public Bot" toggle')
-        print(f'\n🔗 Invite URL:')
-        print(f'   https://discord.com/oauth2/authorize?client_id=1442827241892352073&permissions=2147568640&scope=bot')
-        print(f'\n' + '='*50 + '\n')
+        print('\n' + '='*60)
+        print('❌ ERROR: DISCORD_TOKEN not found!')
+        print('='*60)
+        print('\n📝 To fix this:')
+        print('   1. Create a file named ".env" in the same folder as bot.py')
+        print('   2. Add this line to the .env file:')
+        print('      DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN_HERE')
+        print('\n   Example:')
+        print('      DISCORD_TOKEN=MTQ0MjgyNzI0MTg5MjM1MjA3Mw.GZEJJe.3ZJob0TcDel9GlnGPAxfCc6LSWkBtzLAvDKu0M')
+        print('\n   Get your token from:')
+        print('   https://discord.com/developers/applications/1442827241892352073/bot')
+        print('\n' + '='*60 + '\n')
+        exit(1)
+    
+    # Validate token format
+    if len(DISCORD_TOKEN) < 50:
+        print('\n' + '='*60)
+        print('❌ ERROR: Discord token appears to be invalid!')
+        print('='*60)
+        print('\n⚠️  Discord bot tokens are usually 59+ characters long.')
+        print(f'   Your token length: {len(DISCORD_TOKEN)}')
+        print('\n📝 Please check your .env file and make sure:')
+        print('   1. The token is correct (no extra spaces)')
+        print('   2. The token is on a single line')
+        print('   3. There are no quotes around the token')
+        print('\n   Example format in .env:')
+        print('      DISCORD_TOKEN=MTQ0MjgyNzI0MTg5MjM1MjA3Mw.GZEJJe.3ZJob0TcDel9GlnGPAxfCc6LSWkBtzLAvDKu0M')
+        print('\n' + '='*60 + '\n')
+        exit(1)
+    
+    print('\n' + '='*50)
+    print('🤖 Aternos Discord Bot Starting...')
+    print('='*50)
+    print(f'\n✅ Bot token loaded (length: {len(DISCORD_TOKEN)} characters)')
+    print(f'\n📋 To make bot public:')
+    print(f'   1. Go to: https://discord.com/developers/applications/1442827241892352073/bot')
+    print(f'   2. Enable "Public Bot" toggle')
+    print(f'\n🔗 Invite URL:')
+    print(f'   https://discord.com/oauth2/authorize?client_id=1442827241892352073&permissions=2147568640&scope=bot')
+    print(f'\n' + '='*50 + '\n')
+    
+    try:
         bot.run(DISCORD_TOKEN)
+    except discord.errors.LoginFailure:
+        print('\n' + '='*60)
+        print('❌ ERROR: Failed to login to Discord!')
+        print('='*60)
+        print('\n⚠️  The Discord token is invalid or expired.')
+        print('\n📝 To fix this:')
+        print('   1. Go to: https://discord.com/developers/applications/1442827241892352073/bot')
+        print('   2. Click "Reset Token" to get a new token')
+        print('   3. Copy the new token')
+        print('   4. Update your .env file with the new token')
+        print('   5. Restart the bot')
+        print('\n' + '='*60 + '\n')
+        exit(1)
+    except Exception as e:
+        print(f'\n❌ Unexpected error: {e}')
+        import traceback
+        traceback.print_exc()
+        exit(1)
 
