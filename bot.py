@@ -2756,9 +2756,10 @@ if __name__ == '__main__':
         class HealthHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
+                self.send_header('Content-type', 'text/plain; charset=utf-8')
                 self.end_headers()
-                self.wfile.write(b'🤖 Aternos Discord Bot is running!')
+                message = '🤖 Aternos Discord Bot is running!'
+                self.wfile.write(message.encode('utf-8'))
             
             def log_message(self, format, *args):
                 pass  # Suppress HTTP server logs
