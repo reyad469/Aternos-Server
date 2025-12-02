@@ -1305,9 +1305,10 @@ async def check_extend_button_exists(aternos_server):
     
     return False
 
-async def fetch_countdown_from_panel(aternos_server):
-    """Fetch countdown timer from Aternos panel page HTML"""
+async def fetch_countdown_and_button(aternos_server):
+    """Fetch countdown timer and check for extend button from Aternos panel page HTML"""
     countdown_seconds = None
+    extend_button_exists = False
     
     try:
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
@@ -1318,8 +1319,6 @@ async def fetch_countdown_from_panel(aternos_server):
             urls_to_try = [
                 f'https://aternos.org/server/?id={server_id}',  # Server-specific (most reliable)
                 'https://aternos.org/server/',  # Main panel
-                f'https://aternos.org/panel/?id={server_id}',  # Panel with ID
-                'https://aternos.org/panel/',  # Panel page
             ]
             
             # Use the session from atconn
@@ -1330,67 +1329,64 @@ async def fetch_countdown_from_panel(aternos_server):
                 
                 for panel_url in urls_to_try:
                     try:
+                        html_content = None
                         if isinstance(session, aiohttp.ClientSession):
                             # Async aiohttp session
                             async with session.get(panel_url) as response:
-                                print(f"Fetching countdown from: {panel_url} (status: {response.status})")
                                 if response.status == 200:
                                     html_content = await response.text()
-                                    countdown_seconds = parse_countdown_from_html(html_content)
-                                    if countdown_seconds is not None:
-                                        print(f"✅ Successfully found countdown from {panel_url}")
-                                        break
                                 else:
                                     print(f"Failed to fetch {panel_url}: Status {response.status}")
                         elif isinstance(session, requests.Session):
                             # Sync requests session
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
-                            print(f"Fetching countdown from: {panel_url} (status: {response.status_code})")
                             if response.status_code == 200:
                                 html_content = response.text
-                                countdown_seconds = parse_countdown_from_html(html_content)
-                                if countdown_seconds is not None:
-                                    print(f"✅ Successfully found countdown from {panel_url}")
-                                    break
                             else:
                                 print(f"Failed to fetch {panel_url}: Status {response.status_code}")
+                        
+                        if html_content:
+                            # Check for extend button first (more reliable indicator)
+                            button_patterns = [
+                                'server-extend-end',
+                                'btn btn-tiny btn-success server-extend-end',
+                                'class="extend"',
+                                'server-extend',
+                                'extend-end',
+                                'fas fa-plus',
+                            ]
+                            
+                            for pattern in button_patterns:
+                                if pattern in html_content:
+                                    extend_button_exists = True
+                                    print(f"✅ Extend button found using pattern: '{pattern}'")
+                                    break
+                            
+                            # Also check for countdown div which appears with the button
+                            if 'server-end-countdown' in html_content:
+                                # If countdown exists, check if extend div is nearby
+                                if 'extend' in html_content.lower() or 'fa-plus' in html_content:
+                                    extend_button_exists = True
+                                    print(f"✅ Extend button likely exists (found countdown + extend references)")
+                            
+                            # Parse countdown from HTML
+                            countdown_seconds = parse_countdown_from_html(html_content)
+                            
+                            if countdown_seconds is not None or extend_button_exists:
+                                print(f"✅ Successfully fetched data from {panel_url}")
+                                break
                     except Exception as e:
                         print(f"Error fetching {panel_url}: {e}")
                         import traceback
                         traceback.print_exc()
                         continue
-                
-                # If we still don't have countdown, try API endpoint
-                if countdown_seconds is None:
-                    try:
-                        # Try to get server info from API
-                        if hasattr(atconn, 'request_cloudflare'):
-                            api_url = f'https://aternos.org/panel/ajax/server.php?id={server_id}'
-                            try:
-                                api_response = atconn.request_cloudflare(api_url, 'GET')
-                                if api_response and isinstance(api_response, dict):
-                                    # Look for countdown in API response
-                                    for key in ['countdown', 'end_countdown', 'time_left', 'remaining']:
-                                        if key in api_response:
-                                            val = api_response[key]
-                                            if isinstance(val, (int, str)):
-                                                try:
-                                                    countdown_seconds = int(val)
-                                                    print(f"✅ Found countdown from API: {countdown_seconds}s")
-                                                    break
-                                                except ValueError:
-                                                    pass
-                            except Exception as api_err:
-                                print(f"API fetch failed: {api_err}")
-                    except Exception as api_error:
-                        print(f"Error trying API endpoint: {api_error}")
     except Exception as e:
-        print(f"Error in fetch_countdown_from_panel: {e}")
+        print(f"Error in fetch_countdown_and_button: {e}")
         import traceback
         traceback.print_exc()
     
-    return countdown_seconds
+    return countdown_seconds, extend_button_exists
 
 def get_players_online(aternos_server):
     """Get number of players currently online"""
@@ -1534,12 +1530,18 @@ async def monitor_auto_start(guild_id):
                                             confirm_reason = f"queue.pending contains 'confirm': '{pending}'"
                                             print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
                                     
-                                    # Position 1 or 0 means queue finished
+                                    # Position 1 or 0 means queue finished - ALWAYS needs confirmation
                                     if not confirm_needed and position is not None and position <= 1:
-                                        if pending and str(pending).lower() == 'pending':
-                                            confirm_needed = True
-                                            confirm_reason = f"queue position={position}, pending='{pending}'"
-                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                        # Position <= 1 means queue finished, needs confirmation
+                                        confirm_needed = True
+                                        confirm_reason = f"queue position={position} (queue finished)"
+                                        print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    
+                                    # Also check if position is very low (2-5) and status is waiting
+                                    if not confirm_needed and position is not None and 2 <= position <= 5:
+                                        if current_status == 'waiting':
+                                            # Queue is almost done, check more frequently
+                                            print(f"🔍 Queue position is {position}, monitoring closely...")
                             
                             # Check label, class, lang
                             if not confirm_needed:
@@ -1789,11 +1791,8 @@ async def monitor_auto_start(guild_id):
                             # No players online - check countdown timer
                             print(f"👤 No players online for guild {guild_id}, checking countdown timer...")
                             
-                            # Try to fetch countdown and check for button in one go
-                            countdown_seconds = await fetch_countdown_from_panel(aternos_server)
-                            
-                            # Also check if extend button exists (indicates countdown <= 60 seconds)
-                            extend_button_exists = await check_extend_button_exists(aternos_server)
+                            # Fetch countdown and check for button in one go (more efficient)
+                            countdown_seconds, extend_button_exists = await fetch_countdown_and_button(aternos_server)
                             
                             # If button exists OR countdown < 60, extend
                             should_extend = False
@@ -1802,6 +1801,8 @@ async def monitor_auto_start(guild_id):
                             if extend_button_exists:
                                 should_extend = True
                                 reason = "extend button is visible"
+                                if countdown_seconds is not None:
+                                    reason += f" (countdown: {countdown_seconds}s)"
                             elif countdown_seconds is not None and countdown_seconds < 60:
                                 should_extend = True
                                 reason = f"countdown is {countdown_seconds}s (< 60s)"
@@ -1820,6 +1821,13 @@ async def monitor_auto_start(guild_id):
                             else:
                                 if countdown_seconds is not None:
                                     print(f"✅ Countdown is {countdown_seconds}s (>= 60s), no extension needed")
+                                elif extend_button_exists:
+                                    # Button exists but we couldn't parse countdown - extend anyway
+                                    print(f"🚨 Extend button visible but couldn't parse countdown, extending anyway...")
+                                    extend_success = await extend_server_time(aternos_server)
+                                    if extend_success:
+                                        print(f"✅ Server time extended by 1 minute for guild {guild_id}")
+                                        await asyncio.sleep(3)
                                 else:
                                     print(f"ℹ️ Could not fetch countdown timer for guild {guild_id} (button not visible, countdown likely > 60s)")
                         else:
@@ -1830,8 +1838,23 @@ async def monitor_auto_start(guild_id):
                         import traceback
                         traceback.print_exc()
                 
-                # Wait 5 seconds before next check (adjustable)
-                await asyncio.sleep(5)
+                # Adjust wait time based on server status
+                # If server is waiting and might need confirmation soon, check more frequently
+                wait_time = 5
+                if current_status == 'waiting':
+                    # Check if queue position is low (might need confirmation soon)
+                    if hasattr(aternos_server, '_info'):
+                        info_data = getattr(aternos_server, '_info')
+                        if isinstance(info_data, dict) and 'queue' in info_data:
+                            queue_info = info_data.get('queue', {})
+                            if isinstance(queue_info, dict):
+                                position = queue_info.get('position', None)
+                                if position is not None and position <= 5:
+                                    # Queue is close to finishing, check every 2 seconds
+                                    wait_time = 2
+                                    print(f"⏱️ Queue position {position}, checking every {wait_time}s for confirmation...")
+                
+                await asyncio.sleep(wait_time)
                 
             except Exception as fetch_error:
                 print(f"⚠️ Error fetching server status for guild {guild_id}: {fetch_error}")
