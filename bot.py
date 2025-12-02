@@ -1151,6 +1151,197 @@ def parse_queue_from_html(html_content):
     
     return queue_position, queue_time_str
 
+def parse_countdown_from_html(html_content):
+    """Parse countdown timer from Aternos HTML (format: M:SS or SS)"""
+    countdown_seconds = None
+    
+    try:
+        # Try using BeautifulSoup if available
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Find countdown: <div class="server-end-countdown">0:35</div>
+            countdown_elem = soup.find('div', class_=lambda x: x and 'server-end-countdown' in x)
+            if countdown_elem:
+                countdown_text = countdown_elem.get_text(strip=True)
+                if countdown_text:
+                    # Parse format like "0:35" or "35"
+                    if ':' in countdown_text:
+                        parts = countdown_text.split(':')
+                        if len(parts) == 2:
+                            minutes = int(parts[0])
+                            seconds = int(parts[1])
+                            countdown_seconds = minutes * 60 + seconds
+                    else:
+                        # Just seconds
+                        countdown_seconds = int(countdown_text)
+                    print(f"Found countdown in HTML: {countdown_text} ({countdown_seconds}s)")
+        except ImportError:
+            # BeautifulSoup not available, use regex
+            pass
+        except Exception as e:
+            print(f"Error with BeautifulSoup, trying regex: {e}")
+        
+        # Always try regex as fallback
+        if countdown_seconds is None:
+            # Pattern for countdown: <div class="server-end-countdown">0:35</div>
+            countdown_match = re.search(r'<div[^>]*class="[^"]*server-end-countdown[^"]*"[^>]*>([^<]+)</div>', html_content, re.IGNORECASE | re.DOTALL)
+            if countdown_match:
+                countdown_text = countdown_match.group(1).strip()
+                # Parse format like "0:35" or "35"
+                if ':' in countdown_text:
+                    parts = countdown_text.split(':')
+                    if len(parts) == 2:
+                        minutes = int(parts[0])
+                        seconds = int(parts[1])
+                        countdown_seconds = minutes * 60 + seconds
+                else:
+                    # Just seconds
+                    countdown_seconds = int(countdown_text)
+                print(f"Found countdown in HTML (regex): {countdown_text} ({countdown_seconds}s)")
+    except Exception as e:
+        print(f"Error parsing countdown HTML: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return countdown_seconds
+
+async def fetch_countdown_from_panel(aternos_server):
+    """Fetch countdown timer from Aternos panel page HTML"""
+    countdown_seconds = None
+    
+    try:
+        if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
+            atconn = aternos_server.atconn
+            server_id = aternos_server.servid
+            
+            # Try multiple URLs
+            urls_to_try = [
+                'https://aternos.org/server/',  # Main panel
+                f'https://aternos.org/server/?id={server_id}',  # Server-specific
+                'https://aternos.org/panel/',  # Panel page
+            ]
+            
+            # Use the session from atconn
+            if hasattr(atconn, 'session'):
+                session = atconn.session
+                import aiohttp
+                import requests
+                
+                for panel_url in urls_to_try:
+                    try:
+                        if isinstance(session, aiohttp.ClientSession):
+                            # Async aiohttp session
+                            async with session.get(panel_url) as response:
+                                if response.status == 200:
+                                    html_content = await response.text()
+                                    countdown_seconds = parse_countdown_from_html(html_content)
+                                    if countdown_seconds is not None:
+                                        print(f"Successfully found countdown from {panel_url}")
+                                        break
+                        elif isinstance(session, requests.Session):
+                            # Sync requests session
+                            loop = asyncio.get_event_loop()
+                            response = await loop.run_in_executor(None, session.get, panel_url)
+                            if response.status_code == 200:
+                                html_content = response.text
+                                countdown_seconds = parse_countdown_from_html(html_content)
+                                if countdown_seconds is not None:
+                                    print(f"Successfully found countdown from {panel_url}")
+                                    break
+                    except Exception as e:
+                        print(f"Error fetching {panel_url}: {e}")
+                        continue
+    except Exception as e:
+        print(f"Error in fetch_countdown_from_panel: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return countdown_seconds
+
+def get_players_online(aternos_server):
+    """Get number of players currently online"""
+    try:
+        players_list = getattr(aternos_server, 'players_list', None)
+        if players_list is not None:
+            if isinstance(players_list, list):
+                return len(players_list)
+            elif isinstance(players_list, (int, str)):
+                return int(players_list)
+        return 0
+    except Exception as e:
+        print(f"Error getting players online: {e}")
+        return 0
+
+async def extend_server_time(aternos_server):
+    """Extend server time by clicking the extend button"""
+    try:
+        if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
+            atconn = aternos_server.atconn
+            server_id = aternos_server.servid
+            
+            # Try multiple extend endpoints
+            extend_urls = [
+                'https://aternos.org/ajax/server/extend',
+                f'https://aternos.org/ajax/server/extend?id={server_id}',
+                'https://aternos.org/panel/ajax/extend.php',
+                f'https://aternos.org/panel/ajax/extend.php?id={server_id}',
+            ]
+            
+            if hasattr(atconn, 'request_cloudflare'):
+                for extend_url in extend_urls:
+                    try:
+                        # Try POST request to extend endpoint
+                        print(f"   Trying POST to {extend_url}...")
+                        response = atconn.request_cloudflare(extend_url, 'POST')
+                        if response is not None:
+                            # Check if response indicates success
+                            if isinstance(response, dict):
+                                if response.get('status') == 'success' or 'success' in str(response).lower():
+                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                    return True
+                            elif isinstance(response, str):
+                                if 'success' in response.lower() or 'ok' in response.lower():
+                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                    return True
+                            else:
+                                # Any response is likely success
+                                print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                return True
+                    except Exception as post_err:
+                        print(f"   POST to {extend_url} failed: {post_err}")
+                        # Try GET as fallback
+                        try:
+                            response = atconn.request_cloudflare(extend_url, 'GET')
+                            if response is not None:
+                                print(f"✅✅✅ Server time extended successfully via {extend_url} (GET)!")
+                                return True
+                        except Exception as get_err:
+                            print(f"   GET to {extend_url} also failed: {get_err}")
+                            continue
+            
+            # Try direct session POST
+            if hasattr(atconn, 'session'):
+                session = atconn.session
+                import requests
+                if isinstance(session, requests.Session):
+                    for extend_url in extend_urls:
+                        try:
+                            loop = asyncio.get_event_loop()
+                            response = await loop.run_in_executor(None, lambda: session.post(extend_url, data={}, timeout=10))
+                            if response.status_code in [200, 201]:
+                                print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
+                                return True
+                        except Exception as session_err:
+                            print(f"   Direct session POST to {extend_url} failed: {session_err}")
+                            continue
+    except Exception as e:
+        print(f"Error extending server time: {e}")
+        import traceback
+        traceback.print_exc()
+    
+    return False
+
 async def monitor_auto_start(guild_id):
     """Background task to monitor server and auto-start if it goes offline"""
     print(f"🔄 Auto-start monitoring started for guild {guild_id}")
@@ -1454,6 +1645,46 @@ async def monitor_auto_start(guild_id):
                             
                     except Exception as start_error:
                         print(f"❌ Error auto-starting server for guild {guild_id}: {start_error}")
+                
+                # Auto-extend: If server is online and no players, check countdown and extend if < 60 seconds
+                elif current_status == 'online':
+                    try:
+                        # Check if players are online
+                        players_online = get_players_online(aternos_server)
+                        
+                        if players_online == 0:
+                            # No players online - check countdown timer
+                            print(f"👤 No players online for guild {guild_id}, checking countdown timer...")
+                            
+                            # Fetch countdown from panel
+                            countdown_seconds = await fetch_countdown_from_panel(aternos_server)
+                            
+                            if countdown_seconds is not None:
+                                print(f"⏱️ Countdown: {countdown_seconds} seconds")
+                                
+                                # If countdown is less than 60 seconds, extend server time
+                                if countdown_seconds < 60:
+                                    print(f"🚨 Countdown is less than 60 seconds ({countdown_seconds}s), extending server time...")
+                                    
+                                    extend_success = await extend_server_time(aternos_server)
+                                    
+                                    if extend_success:
+                                        print(f"✅ Server time extended by 1 minute for guild {guild_id}")
+                                        # Wait a bit for the countdown to update
+                                        await asyncio.sleep(3)
+                                    else:
+                                        print(f"⚠️ Failed to extend server time for guild {guild_id}, will retry on next check")
+                                else:
+                                    print(f"✅ Countdown is {countdown_seconds}s (>= 60s), no extension needed")
+                            else:
+                                print(f"⚠️ Could not fetch countdown timer for guild {guild_id}")
+                        else:
+                            # Players are online, no need to extend
+                            print(f"👥 {players_online} player(s) online for guild {guild_id}, no extension needed")
+                    except Exception as extend_error:
+                        print(f"⚠️ Error in auto-extend check for guild {guild_id}: {extend_error}")
+                        import traceback
+                        traceback.print_exc()
                 
                 # Wait 5 seconds before next check (adjustable)
                 await asyncio.sleep(5)
