@@ -1333,18 +1333,22 @@ async def fetch_countdown_and_button(aternos_server):
                         if isinstance(session, aiohttp.ClientSession):
                             # Async aiohttp session
                             async with session.get(panel_url) as response:
+                                print(f"🔍 Fetching HTML from: {panel_url} (status: {response.status})")
                                 if response.status == 200:
                                     html_content = await response.text()
+                                    print(f"✅ Got HTML content ({len(html_content)} chars)")
                                 else:
-                                    print(f"Failed to fetch {panel_url}: Status {response.status}")
+                                    print(f"❌ Failed to fetch {panel_url}: Status {response.status}")
                         elif isinstance(session, requests.Session):
                             # Sync requests session
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
+                            print(f"🔍 Fetching HTML from: {panel_url} (status: {response.status_code})")
                             if response.status_code == 200:
                                 html_content = response.text
+                                print(f"✅ Got HTML content ({len(html_content)} chars)")
                             else:
-                                print(f"Failed to fetch {panel_url}: Status {response.status_code}")
+                                print(f"❌ Failed to fetch {panel_url}: Status {response.status_code}")
                         
                         if html_content:
                             # Check for extend button first (more reliable indicator)
@@ -1355,34 +1359,44 @@ async def fetch_countdown_and_button(aternos_server):
                                 'server-extend',
                                 'extend-end',
                                 'fas fa-plus',
+                                'fa-plus',
                             ]
                             
+                            print(f"🔍 Checking for extend button in HTML...")
                             for pattern in button_patterns:
                                 if pattern in html_content:
                                     extend_button_exists = True
-                                    print(f"✅ Extend button found using pattern: '{pattern}'")
+                                    print(f"✅✅✅ Extend button found using pattern: '{pattern}'")
                                     break
                             
                             # Also check for countdown div which appears with the button
-                            if 'server-end-countdown' in html_content:
+                            if not extend_button_exists and 'server-end-countdown' in html_content:
                                 # If countdown exists, check if extend div is nearby
                                 if 'extend' in html_content.lower() or 'fa-plus' in html_content:
                                     extend_button_exists = True
-                                    print(f"✅ Extend button likely exists (found countdown + extend references)")
+                                    print(f"✅✅✅ Extend button likely exists (found countdown + extend references)")
                             
                             # Parse countdown from HTML
+                            print(f"🔍 Parsing countdown from HTML...")
                             countdown_seconds = parse_countdown_from_html(html_content)
+                            
+                            if countdown_seconds is not None:
+                                print(f"✅ Found countdown: {countdown_seconds}s")
                             
                             if countdown_seconds is not None or extend_button_exists:
                                 print(f"✅ Successfully fetched data from {panel_url}")
                                 break
+                        else:
+                            print(f"⚠️ No HTML content received from {panel_url}")
                     except Exception as e:
-                        print(f"Error fetching {panel_url}: {e}")
+                        print(f"❌ Error fetching {panel_url}: {e}")
                         import traceback
                         traceback.print_exc()
                         continue
+            else:
+                print(f"⚠️ No session available in atconn")
     except Exception as e:
-        print(f"Error in fetch_countdown_and_button: {e}")
+        print(f"❌ Error in fetch_countdown_and_button: {e}")
         import traceback
         traceback.print_exc()
     
@@ -1404,25 +1418,31 @@ def get_players_online(aternos_server):
 
 async def extend_server_time(aternos_server):
     """Extend server time by clicking the extend button"""
+    print(f"🔧 Attempting to extend server time...")
     try:
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
             
+            print(f"   Server ID: {server_id}")
+            print(f"   Has request_cloudflare: {hasattr(atconn, 'request_cloudflare')}")
+            print(f"   Has session: {hasattr(atconn, 'session')}")
+            
             # Try multiple extend endpoints
             extend_urls = [
-                'https://aternos.org/ajax/server/extend',
                 f'https://aternos.org/ajax/server/extend?id={server_id}',
-                'https://aternos.org/panel/ajax/extend.php',
+                'https://aternos.org/ajax/server/extend',
                 f'https://aternos.org/panel/ajax/extend.php?id={server_id}',
+                'https://aternos.org/panel/ajax/extend.php',
             ]
             
             if hasattr(atconn, 'request_cloudflare'):
                 for extend_url in extend_urls:
                     try:
                         # Try POST request to extend endpoint
-                        print(f"   Trying POST to {extend_url}...")
+                        print(f"   🔄 Trying POST to {extend_url}...")
                         response = atconn.request_cloudflare(extend_url, 'POST')
+                        print(f"   📥 Response: {type(response)} - {response}")
                         if response is not None:
                             # Check if response indicates success
                             if isinstance(response, dict):
@@ -1438,15 +1458,17 @@ async def extend_server_time(aternos_server):
                                 print(f"✅✅✅ Server time extended successfully via {extend_url}!")
                                 return True
                     except Exception as post_err:
-                        print(f"   POST to {extend_url} failed: {post_err}")
+                        print(f"   ❌ POST to {extend_url} failed: {post_err}")
                         # Try GET as fallback
                         try:
+                            print(f"   🔄 Trying GET to {extend_url}...")
                             response = atconn.request_cloudflare(extend_url, 'GET')
+                            print(f"   📥 GET Response: {type(response)} - {response}")
                             if response is not None:
                                 print(f"✅✅✅ Server time extended successfully via {extend_url} (GET)!")
                                 return True
                         except Exception as get_err:
-                            print(f"   GET to {extend_url} also failed: {get_err}")
+                            print(f"   ❌ GET to {extend_url} also failed: {get_err}")
                             continue
             
             # Try direct session POST
@@ -1456,19 +1478,24 @@ async def extend_server_time(aternos_server):
                 if isinstance(session, requests.Session):
                     for extend_url in extend_urls:
                         try:
+                            print(f"   🔄 Trying direct session POST to {extend_url}...")
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, lambda: session.post(extend_url, data={}, timeout=10))
+                            print(f"   📥 Direct POST Response: {response.status_code} - {response.text[:100]}")
                             if response.status_code in [200, 201]:
                                 print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
                                 return True
                         except Exception as session_err:
-                            print(f"   Direct session POST to {extend_url} failed: {session_err}")
+                            print(f"   ❌ Direct session POST to {extend_url} failed: {session_err}")
                             continue
+                else:
+                    print(f"   ⚠️ Session is not requests.Session, type: {type(session)}")
     except Exception as e:
-        print(f"Error extending server time: {e}")
+        print(f"❌ Error extending server time: {e}")
         import traceback
         traceback.print_exc()
     
+    print(f"❌ All extend methods failed")
     return False
 
 async def monitor_auto_start(guild_id):
@@ -1794,6 +1821,9 @@ async def monitor_auto_start(guild_id):
                             # Fetch countdown and check for button in one go (more efficient)
                             countdown_seconds, extend_button_exists = await fetch_countdown_and_button(aternos_server)
                             
+                            # Log what we found
+                            print(f"📊 Extend check results: button_exists={extend_button_exists}, countdown={countdown_seconds}")
+                            
                             # If button exists OR countdown < 60, extend
                             should_extend = False
                             reason = ""
@@ -1821,13 +1851,6 @@ async def monitor_auto_start(guild_id):
                             else:
                                 if countdown_seconds is not None:
                                     print(f"✅ Countdown is {countdown_seconds}s (>= 60s), no extension needed")
-                                elif extend_button_exists:
-                                    # Button exists but we couldn't parse countdown - extend anyway
-                                    print(f"🚨 Extend button visible but couldn't parse countdown, extending anyway...")
-                                    extend_success = await extend_server_time(aternos_server)
-                                    if extend_success:
-                                        print(f"✅ Server time extended by 1 minute for guild {guild_id}")
-                                        await asyncio.sleep(3)
                                 else:
                                     print(f"ℹ️ Could not fetch countdown timer for guild {guild_id} (button not visible, countdown likely > 60s)")
                         else:
