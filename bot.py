@@ -1291,96 +1291,147 @@ async def monitor_auto_start(guild_id):
                     import traceback
                     traceback.print_exc()
                 
-                    # If confirmation is needed, try to confirm automatically with retries
-                    if confirm_needed:
-                        print(f"🚨🚨🚨 CONFIRMATION REQUIRED - REASON: {confirm_reason} 🚨🚨🚨")
-                        print(f"🚀 Attempting AUTOMATIC confirmation for guild {guild_id} (no manual interaction needed)...")
-                        
-                        auto_confirm_success = False
-                        max_retries = 3
-                        
-                        for retry in range(max_retries):
+                # If confirmation is needed, try to confirm automatically with retries
+                if confirm_needed:
+                    print(f"🚨🚨🚨 CONFIRMATION REQUIRED - REASON: {confirm_reason} 🚨🚨🚨")
+                    print(f"🚀 Attempting AUTOMATIC confirmation for guild {guild_id} (no manual interaction needed)...")
+                    
+                    auto_confirm_success = False
+                    max_retries = 5  # Increased retries
+                    
+                    for retry in range(max_retries):
+                        try:
+                            # Refresh server status and re-authenticate if needed
                             try:
-                                # Refresh server status before confirming
                                 aternos_server.fetch()
+                            except:
+                                # If fetch fails, try re-authenticating
+                                print(f"   Fetch failed, re-authenticating...")
+                                await connect_to_aternos(guild_id)
+                                aternos_server = server_servers.get(str(guild_id))
+                                if aternos_server:
+                                    aternos_server.fetch()
+                            
+                            if hasattr(aternos_server, 'atconn'):
+                                atconn = aternos_server.atconn
+                                server_id = getattr(aternos_server, 'servid', None)
                                 
-                                if hasattr(aternos_server, 'atconn'):
-                                    atconn = aternos_server.atconn
-                                    
-                                    # Method 1: Try request_cloudflare (most reliable)
-                                    if hasattr(atconn, 'request_cloudflare'):
-                                        try:
+                                # Method 1: Try library confirm() method FIRST (most reliable)
+                                if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
+                                    try:
+                                        print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method...")
+                                        aternos_server.confirm()
+                                        auto_confirm_success = True
+                                        print(f"✅✅✅ AUTO-CONFIRMED (library method) for guild {guild_id}!")
+                                        break
+                                    except Exception as lib_err:
+                                        error_str = str(lib_err)
+                                        print(f"   Library confirm() failed: {lib_err}")
+                                        # If it's a token error, try re-auth
+                                        if '400' in error_str or '401' in error_str or 'token' in error_str.lower():
+                                            print(f"   Token error detected, re-authenticating...")
+                                            await connect_to_aternos(guild_id)
+                                            aternos_server = server_servers.get(str(guild_id))
+                                            if aternos_server:
+                                                aternos_server.fetch()
+                                
+                                # Method 2: Try request_cloudflare with server ID
+                                if not auto_confirm_success and hasattr(atconn, 'request_cloudflare'):
+                                    try:
+                                        # Build confirm URL with server ID if available
+                                        if server_id:
+                                            confirm_url = f'https://aternos.org/ajax/server/confirm?id={server_id}'
+                                        else:
                                             confirm_url = 'https://aternos.org/ajax/server/confirm'
-                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying GET request...")
-                                            response = atconn.request_cloudflare(confirm_url, 'GET')
+                                        
+                                        print(f"   Attempt {retry + 1}/{max_retries}: Trying POST request to {confirm_url}...")
+                                        
+                                        # Try POST first (more reliable for confirmations)
+                                        try:
+                                            response = atconn.request_cloudflare(confirm_url, 'POST')
                                             if response is not None:
                                                 auto_confirm_success = True
-                                                print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
+                                                print(f"✅✅✅ AUTO-CONFIRMED (POST) for guild {guild_id}!")
                                                 break
-                                        except Exception as get_err:
-                                            print(f"   GET failed: {get_err}, trying POST...")
+                                        except Exception as post_err:
+                                            print(f"   POST failed: {post_err}, trying GET...")
                                             try:
-                                                response = atconn.request_cloudflare(confirm_url, 'POST')
+                                                response = atconn.request_cloudflare(confirm_url, 'GET')
                                                 if response is not None:
                                                     auto_confirm_success = True
-                                                    print(f"✅✅✅ AUTO-CONFIRMED (POST) for guild {guild_id}!")
+                                                    print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
                                                     break
-                                            except Exception as post_err:
-                                                print(f"   POST also failed: {post_err}")
-                                                if retry < max_retries - 1:
-                                                    print(f"   Retrying in 2 seconds...")
-                                                    await asyncio.sleep(2)
+                                            except Exception as get_err:
+                                                print(f"   GET also failed: {get_err}")
                                     
-                                    # Method 2: Try library confirm() method
-                                    if not auto_confirm_success and hasattr(aternos_server, 'confirm'):
-                                        try:
-                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method...")
-                                            aternos_server.confirm()
-                                            auto_confirm_success = True
-                                            print(f"✅✅✅ AUTO-CONFIRMED (library method) for guild {guild_id}!")
-                                            break
-                                        except Exception as lib_err:
-                                            print(f"   Library confirm() failed: {lib_err}")
-                                            if retry < max_retries - 1:
-                                                print(f"   Retrying in 2 seconds...")
-                                                await asyncio.sleep(2)
-                                else:
-                                    # No atconn, try library method directly
-                                    if hasattr(aternos_server, 'confirm'):
-                                        try:
-                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method (no atconn)...")
-                                            aternos_server.confirm()
-                                            auto_confirm_success = True
-                                            print(f"✅✅✅ AUTO-CONFIRMED (library method) for guild {guild_id}!")
-                                            break
-                                        except Exception as lib_err:
-                                            print(f"   Library confirm() failed: {lib_err}")
-                                            if retry < max_retries - 1:
-                                                print(f"   Retrying in 2 seconds...")
-                                                await asyncio.sleep(2)
+                                    except Exception as cf_error:
+                                        print(f"   request_cloudflare failed: {cf_error}")
                                 
-                                # If we got here and didn't succeed, wait before retry
-                                if not auto_confirm_success and retry < max_retries - 1:
-                                    await asyncio.sleep(2)
-                                    
-                            except Exception as confirm_error:
-                                print(f"   Error in auto-confirm attempt {retry + 1}: {confirm_error}")
-                                if retry < max_retries - 1:
-                                    await asyncio.sleep(2)
-                        
-                        if auto_confirm_success:
-                            # Confirmation successful - wait and check status
-                            print(f"✅ Confirmation sent! Checking server status...")
-                            await asyncio.sleep(3)
+                                # Method 3: Direct session POST with proper data
+                                if not auto_confirm_success and hasattr(atconn, 'session'):
+                                    try:
+                                        session = atconn.session
+                                        if server_id:
+                                            confirm_url = f'https://aternos.org/ajax/server/confirm?id={server_id}'
+                                        else:
+                                            confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                        
+                                        print(f"   Attempt {retry + 1}/{max_retries}: Trying direct session POST...")
+                                        
+                                        import requests
+                                        if isinstance(session, requests.Session):
+                                            import asyncio
+                                            loop = asyncio.get_event_loop()
+                                            # Try POST with empty data
+                                            response = await loop.run_in_executor(None, lambda: session.post(confirm_url, data={}, timeout=10))
+                                            if response.status_code in [200, 201]:
+                                                auto_confirm_success = True
+                                                print(f"✅✅✅ AUTO-CONFIRMED (direct POST) for guild {guild_id}!")
+                                                break
+                                    except Exception as session_err:
+                                        print(f"   Direct session POST failed: {session_err}")
+                            else:
+                                # No atconn, try library method directly
+                                if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
+                                    try:
+                                        print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method (no atconn)...")
+                                        aternos_server.confirm()
+                                        auto_confirm_success = True
+                                        print(f"✅✅✅ AUTO-CONFIRMED (library method) for guild {guild_id}!")
+                                        break
+                                    except Exception as lib_err:
+                                        print(f"   Library confirm() failed: {lib_err}")
+                            
+                            # If we got here and didn't succeed, wait before retry
+                            if not auto_confirm_success and retry < max_retries - 1:
+                                wait_time = (retry + 1) * 2  # Exponential backoff: 2s, 4s, 6s, 8s
+                                print(f"   Waiting {wait_time} seconds before retry...")
+                                await asyncio.sleep(wait_time)
+                                
+                        except Exception as confirm_error:
+                            print(f"   Error in auto-confirm attempt {retry + 1}: {confirm_error}")
+                            import traceback
+                            traceback.print_exc()
+                            if retry < max_retries - 1:
+                                wait_time = (retry + 1) * 2
+                                await asyncio.sleep(wait_time)
+                    
+                    if auto_confirm_success:
+                        # Confirmation successful - wait and check status
+                        print(f"✅ Confirmation sent! Checking server status...")
+                        await asyncio.sleep(3)
+                        try:
                             aternos_server.fetch()
                             new_status = aternos_server.status
                             print(f"📡 Server status after confirmation: {new_status}")
-                            # Continue monitoring
-                            continue
-                        else:
-                            print(f"⚠️ All auto-confirmation attempts failed for guild {guild_id}, will retry on next check")
-                            # Continue monitoring - might succeed on next iteration
-                            continue
+                        except:
+                            pass
+                        # Continue monitoring
+                        continue
+                    else:
+                        print(f"⚠️ All auto-confirmation attempts failed for guild {guild_id}, will retry on next check")
+                        # Continue monitoring - might succeed on next iteration
+                        continue
                 
                 # If server is offline, start it automatically
                 if current_status == 'offline':
@@ -1505,10 +1556,15 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                                 confirm_required = True
                                                 confirm_reason = f"queue position={position}, pending='{pending}'"
                                                 print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                            # Position 1 + status not waiting = likely needs confirmation
-                                            elif current_status != 'waiting' and current_status != 'online' and current_status != 'starting':
+                                            # Position <= 1 = queue finished, needs confirmation
+                                            elif position == 1:
                                                 confirm_required = True
-                                                confirm_reason = f"queue position={position}, status={current_status}"
+                                                confirm_reason = f"queue position={position} (queue finished), status={current_status}"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                            # Position 0 = definitely needs confirmation
+                                            elif position == 0:
+                                                confirm_required = True
+                                                confirm_reason = f"queue position={position} (queue finished), status={current_status}"
                                                 print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
                                     
                                     # Check 1.4: Queue status changed
@@ -1733,12 +1789,12 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                 position = queue_info.get('position', None)
                                 pending = queue_info.get('pending', '')
                                 
-                                # Check if queue finished (position 1) or has pending status
-                                if position is not None and position == 1:
-                                    # Position 1 means queue finished - needs confirmation even if status is "waiting"
+                                # Check if queue finished (position <= 1) or has pending status
+                                if position is not None and position <= 1:
+                                    # Position 1 or 0 means queue finished - needs confirmation even if status is "waiting"
                                     if hasattr(aternos_server, 'confirm'):
                                         confirm_required = True
-                                        confirm_reason = f"position=1 (queue finished), status={current_status}, confirm() method available"
+                                        confirm_reason = f"position={position} (queue finished), status={current_status}, confirm() method available"
                                         print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
                                 # Also check for pending status even if position is not 1
                                 elif pending and str(pending).lower() == 'pending':
@@ -1756,43 +1812,27 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                         # Try to confirm IMMEDIATELY and automatically (multiple attempts with retries)
                         print("🚀 Attempting AUTOMATIC confirmation (no manual interaction needed)...")
                         auto_confirm_success = False
-                        max_retries = 3
+                        max_retries = 5  # Increased retries
                         
                         for retry in range(max_retries):
                             try:
-                                # Refresh server status before confirming
-                                aternos_server.fetch()
+                                # Refresh server status and re-authenticate if needed
+                                try:
+                                    aternos_server.fetch()
+                                except:
+                                    # If fetch fails, try re-authenticating
+                                    print(f"   Fetch failed, re-authenticating...")
+                                    await connect_to_aternos(guild_id)
+                                    aternos_server = server_servers.get(str(guild_id))
+                                    if aternos_server:
+                                        aternos_server.fetch()
                                 
                                 if hasattr(aternos_server, 'atconn'):
                                     atconn = aternos_server.atconn
+                                    server_id = getattr(aternos_server, 'servid', None)
                                     
-                                    # Method 1: Try request_cloudflare (most reliable)
-                                    if hasattr(atconn, 'request_cloudflare'):
-                                        try:
-                                            confirm_url = 'https://aternos.org/ajax/server/confirm'
-                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying GET request...")
-                                            response = atconn.request_cloudflare(confirm_url, 'GET')
-                                            if response is not None:
-                                                auto_confirm_success = True
-                                                print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (GET)!")
-                                                break
-                                        except Exception as get_err:
-                                            error_str = str(get_err)
-                                            print(f"   GET failed: {get_err}, trying POST...")
-                                            try:
-                                                response = atconn.request_cloudflare(confirm_url, 'POST')
-                                                if response is not None:
-                                                    auto_confirm_success = True
-                                                    print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (POST)!")
-                                                    break
-                                            except Exception as post_err:
-                                                print(f"   POST also failed: {post_err}")
-                                                if retry < max_retries - 1:
-                                                    print(f"   Retrying in 2 seconds...")
-                                                    await asyncio.sleep(2)
-                                    
-                                    # Method 2: Try library confirm() method
-                                    if not auto_confirm_success and hasattr(aternos_server, 'confirm'):
+                                    # Method 1: Try library confirm() method FIRST (most reliable)
+                                    if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
                                         try:
                                             print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method...")
                                             aternos_server.confirm()
@@ -1800,13 +1840,74 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                             print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (library method)!")
                                             break
                                         except Exception as lib_err:
+                                            error_str = str(lib_err)
                                             print(f"   Library confirm() failed: {lib_err}")
-                                            if retry < max_retries - 1:
-                                                print(f"   Retrying in 2 seconds...")
-                                                await asyncio.sleep(2)
+                                            # If it's a token error, try re-auth
+                                            if '400' in error_str or '401' in error_str or 'token' in error_str.lower():
+                                                print(f"   Token error detected, re-authenticating...")
+                                                await connect_to_aternos(guild_id)
+                                                aternos_server = server_servers.get(str(guild_id))
+                                                if aternos_server:
+                                                    aternos_server.fetch()
+                                    
+                                    # Method 2: Try request_cloudflare with server ID
+                                    if not auto_confirm_success and hasattr(atconn, 'request_cloudflare'):
+                                        try:
+                                            # Build confirm URL with server ID if available
+                                            if server_id:
+                                                confirm_url = f'https://aternos.org/ajax/server/confirm?id={server_id}'
+                                            else:
+                                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                            
+                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying POST request to {confirm_url}...")
+                                            
+                                            # Try POST first (more reliable for confirmations)
+                                            try:
+                                                response = atconn.request_cloudflare(confirm_url, 'POST')
+                                                if response is not None:
+                                                    auto_confirm_success = True
+                                                    print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (POST)!")
+                                                    break
+                                            except Exception as post_err:
+                                                print(f"   POST failed: {post_err}, trying GET...")
+                                                try:
+                                                    response = atconn.request_cloudflare(confirm_url, 'GET')
+                                                    if response is not None:
+                                                        auto_confirm_success = True
+                                                        print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (GET)!")
+                                                        break
+                                                except Exception as get_err:
+                                                    print(f"   GET also failed: {get_err}")
+                                        
+                                        except Exception as cf_error:
+                                            print(f"   request_cloudflare failed: {cf_error}")
+                                    
+                                    # Method 3: Direct session POST with proper data
+                                    if not auto_confirm_success and hasattr(atconn, 'session'):
+                                        try:
+                                            session = atconn.session
+                                            if server_id:
+                                                confirm_url = f'https://aternos.org/ajax/server/confirm?id={server_id}'
+                                            else:
+                                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                            
+                                            print(f"   Attempt {retry + 1}/{max_retries}: Trying direct session POST...")
+                                            
+                                            import requests
+                                            if isinstance(session, requests.Session):
+                                                import asyncio
+                                                loop = asyncio.get_event_loop()
+                                                # Try POST with empty data
+                                                response = await loop.run_in_executor(None, lambda: session.post(confirm_url, data={}, timeout=10))
+                                                if response.status_code in [200, 201]:
+                                                    auto_confirm_success = True
+                                                    print("✅✅✅ AUTOMATIC CONFIRMATION SUCCESSFUL (direct POST)!")
+                                                    break
+                                        except Exception as session_err:
+                                            print(f"   Direct session POST failed: {session_err}")
                                 else:
                                     # No atconn, try library method directly
-                                    if hasattr(aternos_server, 'confirm'):
+                                    if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
                                         try:
                                             print(f"   Attempt {retry + 1}/{max_retries}: Trying library confirm() method (no atconn)...")
                                             aternos_server.confirm()
@@ -1815,22 +1916,32 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                             break
                                         except Exception as lib_err:
                                             print(f"   Library confirm() failed: {lib_err}")
-                                            if retry < max_retries - 1:
-                                                print(f"   Retrying in 2 seconds...")
-                                                await asyncio.sleep(2)
                                 
                                 # If we got here and didn't succeed, wait before retry
                                 if not auto_confirm_success and retry < max_retries - 1:
-                                    await asyncio.sleep(2)
+                                    wait_time = (retry + 1) * 2  # Exponential backoff: 2s, 4s, 6s, 8s
+                                    print(f"   Waiting {wait_time} seconds before retry...")
+                                    await asyncio.sleep(wait_time)
                                     
                             except Exception as confirm_error:
                                 print(f"   Error in auto-confirm attempt {retry + 1}: {confirm_error}")
+                                import traceback
+                                traceback.print_exc()
                                 if retry < max_retries - 1:
-                                    await asyncio.sleep(2)
+                                    wait_time = (retry + 1) * 2
+                                    await asyncio.sleep(wait_time)
                         
                         if auto_confirm_success:
                             # Confirmation successful - update message and continue monitoring
                             await loading_msg.edit(content='✅ **Confirmation sent automatically!**\n⏳ Server is starting...\n\n_No manual confirmation needed!_')
+                            # Wait a bit and check status
+                            await asyncio.sleep(3)
+                            try:
+                                aternos_server.fetch()
+                                new_status = aternos_server.status
+                                print(f"📡 Server status after confirmation: {new_status}")
+                            except:
+                                pass
                             # Continue monitoring to see server go online
                             await asyncio.sleep(2)
                             continue
@@ -2153,45 +2264,69 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                 position = queue_info.get('position', None)
                                 pending = queue_info.get('pending', '')
                                 
-                                # If position is 1 or pending status, queue finished - try to confirm automatically
-                                if (position is not None and position == 1) or (pending and str(pending).lower() == 'pending'):
+                                # If position is 1 or 0, or pending status, queue finished - try to confirm automatically
+                                if (position is not None and position <= 1) or (pending and str(pending).lower() == 'pending'):
                                     print(f"🔍 Queue finished while in 'waiting' status! Position: {position}, Pending: {pending}")
                                     print("🚀 Attempting automatic confirmation...")
                                     
+                                    auto_confirm_success = False
+                                    
                                     try:
-                                        # Try to confirm automatically
-                                        if hasattr(aternos_server, 'atconn'):
+                                        # Refresh server status first
+                                        aternos_server.fetch()
+                                        
+                                        # Try library confirm() method FIRST (most reliable)
+                                        if hasattr(aternos_server, 'confirm') and callable(aternos_server.confirm):
+                                            try:
+                                                aternos_server.confirm()
+                                                auto_confirm_success = True
+                                                print("✅✅✅ AUTO-CONFIRMED using library method!")
+                                            except Exception as lib_err:
+                                                print(f"   Library confirm() failed: {lib_err}")
+                                        
+                                        # Try request_cloudflare if library method failed
+                                        if not auto_confirm_success and hasattr(aternos_server, 'atconn'):
                                             atconn = aternos_server.atconn
+                                            server_id = getattr(aternos_server, 'servid', None)
+                                            
                                             if hasattr(atconn, 'request_cloudflare'):
-                                                confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                                if server_id:
+                                                    confirm_url = f'https://aternos.org/ajax/server/confirm?id={server_id}'
+                                                else:
+                                                    confirm_url = 'https://aternos.org/ajax/server/confirm'
+                                                
                                                 try:
-                                                    response = atconn.request_cloudflare(confirm_url, 'GET')
+                                                    # Try POST first
+                                                    response = atconn.request_cloudflare(confirm_url, 'POST')
                                                     if response is not None:
-                                                        print("✅✅✅ AUTO-CONFIRMED while in waiting status!")
-                                                        await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
-                                                        # Continue monitoring
-                                                        await asyncio.sleep(2)
-                                                        continue
+                                                        auto_confirm_success = True
+                                                        print("✅✅✅ AUTO-CONFIRMED while in waiting status (POST)!")
                                                 except:
                                                     try:
-                                                        response = atconn.request_cloudflare(confirm_url, 'POST')
+                                                        # Try GET as fallback
+                                                        response = atconn.request_cloudflare(confirm_url, 'GET')
                                                         if response is not None:
-                                                            print("✅✅✅ AUTO-CONFIRMED while in waiting status (POST)!")
-                                                            await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
-                                                            await asyncio.sleep(2)
-                                                            continue
+                                                            auto_confirm_success = True
+                                                            print("✅✅✅ AUTO-CONFIRMED while in waiting status (GET)!")
                                                     except:
                                                         pass
                                         
-                                        # Fallback to library method
-                                        if hasattr(aternos_server, 'confirm'):
-                                            aternos_server.confirm()
-                                            print("✅✅✅ AUTO-CONFIRMED using library method!")
+                                        if auto_confirm_success:
                                             await loading_msg.edit(content='✅ **Queue finished! Confirmation sent automatically.**\n⏳ Server is starting...')
+                                            await asyncio.sleep(3)
+                                            try:
+                                                aternos_server.fetch()
+                                                new_status = aternos_server.status
+                                                print(f"📡 Server status after confirmation: {new_status}")
+                                            except:
+                                                pass
                                             await asyncio.sleep(2)
                                             continue
+                                        
                                     except Exception as auto_confirm_err:
                                         print(f"⚠️ Auto-confirm failed while waiting: {auto_confirm_err}")
+                                        import traceback
+                                        traceback.print_exc()
                                         # Continue with normal queue monitoring
                     
                     # Try to fetch queue data from panel page HTML (fetch every 3 seconds to avoid rate limiting)
