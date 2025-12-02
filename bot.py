@@ -23,77 +23,27 @@ class CloudflareSession(_OriginalSession):
     def __init__(self, *args, **kwargs):
         # Don't call super().__init__ - we'll replace everything with cloudscraper
         # Create a cloudscraper session with improved settings
-        # Try multiple browser configurations for better bypass
-        browser_configs = [
-            {
+        self._scraper = cloudscraper.create_scraper(
+            browser={
                 'browser': 'chrome',
                 'platform': 'windows',
                 'desktop': True
             },
-            {
-                'browser': 'firefox',
-                'platform': 'windows',
-                'desktop': True
-            },
-            {
-                'browser': 'chrome',
-                'platform': 'linux',
-                'desktop': True
-            }
-        ]
-        
-        scraper = None
-        last_error = None
-        
-        # Try different browser configs
-        for browser_config in browser_configs:
-            try:
-                scraper = cloudscraper.create_scraper(
-                    browser=browser_config,
-                    delay=20,  # Increased delay for better bypass
-                    debug=False,
-                    captcha={'provider': '2captcha', 'api_key': ''}  # Disable captcha solving
-                )
-                # Test if scraper works
-                test_response = scraper.get('https://www.cloudflare.com', timeout=10)
-                if test_response.status_code == 200:
-                    print(f"✅ Cloudflare bypass successful with {browser_config['browser']} on {browser_config['platform']}")
-                    break
-            except Exception as e:
-                last_error = e
-                continue
-        
-        # If all configs failed, use default chrome
-        if scraper is None:
-            print(f"⚠️ All browser configs failed, using default Chrome config")
-            scraper = cloudscraper.create_scraper(
-                browser={
-                    'browser': 'chrome',
-                    'platform': 'windows',
-                    'desktop': True
-                },
-                delay=25,  # Even longer delay
-                debug=False
-            )
-        
-        self._scraper = scraper
-        
-        # Set realistic headers with updated Chrome version
+            delay=15,  # Increased delay for better bypass
+            debug=False
+        )
+        # Set realistic headers
         self._scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br, zstd',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'Cache-Control': 'max-age=0',
-            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"'
+            'Cache-Control': 'max-age=0'
         })
         
         # Copy all public attributes and methods from scraper to self
@@ -236,247 +186,56 @@ async def connect_to_aternos(guild_id):
         print(f'Username: {creds["username"]}')
         print(f'Password length: {len(creds["password"])} characters')
         
-        # Create cloudscraper session with retry logic
+        # Create cloudscraper session first with more aggressive settings
         print('🔧 Creating cloudscraper session for Cloudflare bypass...')
-        scraper = None
-        max_scraper_retries = 3
-        
-        for scraper_retry in range(max_scraper_retries):
-            try:
-                # Try different browser configs
-                browser_configs = [
-                    {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
-                    {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
-                    {'browser': 'chrome', 'platform': 'linux', 'desktop': True}
-                ]
-                
-                browser_config = browser_configs[scraper_retry % len(browser_configs)]
-                print(f"   Attempt {scraper_retry + 1}/{max_scraper_retries}: Using {browser_config['browser']} on {browser_config['platform']}...")
-                
-                scraper = cloudscraper.create_scraper(
-                    browser=browser_config,
-                    delay=20 + (scraper_retry * 5),  # Increasing delay: 20, 25, 30
-                    debug=False
-                )
-                
-                # Set realistic headers with updated Chrome version
-                scraper.headers.update({
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate, br, zstd',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Cache-Control': 'max-age=0',
-                    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-                    'sec-ch-ua-mobile': '?0',
-                    'sec-ch-ua-platform': '"Windows"'
-                })
-                
-                # Test the scraper (but don't fail if test site is blocked)
-                try:
-                    print(f"   Testing Cloudflare bypass...")
-                    test_response = scraper.get('https://www.cloudflare.com', timeout=15)
-                    if test_response.status_code == 200:
-                        print(f"   ✅ Cloudflare bypass test successful!")
-                        break
-                    else:
-                        print(f"   ⚠️ Test returned status {test_response.status_code}, but continuing anyway...")
-                        # Still use this scraper - test site might be blocked but Aternos might work
-                        break
-                except Exception as test_err:
-                    print(f"   ⚠️ Test failed: {test_err}, but continuing anyway...")
-                    # Still use this scraper - test site might be blocked but Aternos might work
-                    break
-            except Exception as scraper_error:
-                print(f"   ⚠️ Scraper creation/test failed: {scraper_error}")
-                if scraper_retry < max_scraper_retries - 1:
-                    print(f"   Waiting 5 seconds before retry...")
-                    await asyncio.sleep(5)
-                else:
-                    # Use default as last resort (even if test failed)
-                    print(f"   Using default Chrome config as fallback...")
-                    try:
-                        scraper = cloudscraper.create_scraper(
-                            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
-                            delay=30,
-                            debug=False
-                        )
-                        scraper.headers.update({
-                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.9',
-                        })
-                        print(f"   ✅ Fallback scraper created")
-                    except Exception as fallback_err:
-                        print(f"   ❌ Fallback scraper creation also failed: {fallback_err}")
-                        # Continue anyway - might still work
-        
-        # Ensure scraper is set
-        if scraper is None:
-            print(f"   ⚠️ All scraper attempts failed, creating basic scraper...")
-            scraper = cloudscraper.create_scraper(
-                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
-                delay=30,
-                debug=False
-            )
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            },
+            delay=15,  # Increased delay for better bypass
+            debug=False
+        )
+        # Set realistic headers
+        scraper.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        })
         
         # Create client - it should use CloudflareSession due to our patch
         print('🔧 Creating Aternos client...')
         client = Client()
         
-        # CRITICAL: Patch the request_cloudflare method to use our cloudscraper
+        # After client creation, try to inject cloudscraper into the connection's session
+        # This is a fallback in case the patch didn't work
         if hasattr(client, 'atconn'):
             atconn = client.atconn
-            
-            # Replace session with our cloudscraper
             if hasattr(atconn, 'session'):
-                print('   Injecting cloudscraper into connection session...')
-                try:
-                    atconn.session = scraper
-                    print('   ✓ Successfully injected cloudscraper session')
-                except Exception as inject_error:
-                    print(f'   ⚠️ Could not inject session: {inject_error}')
-            
-            # CRITICAL: Patch request_cloudflare to bypass python-aternos's failing method
-            if hasattr(atconn, 'request_cloudflare'):
-                original_request_cloudflare = atconn.request_cloudflare
-                # Store scraper in closure to avoid variable scope issues
-                scraper_ref = scraper
-                
-                def patched_request_cloudflare(url, method='GET', **kwargs):
-                    """Patched request_cloudflare that uses our cloudscraper directly"""
+                original_session = atconn.session
+                # Only replace if it's not already a CloudflareSession
+                if not hasattr(original_session, '_scraper'):
+                    print('   Injecting cloudscraper into connection session...')
                     try:
-                        # Use our cloudscraper session directly
-                        if method.upper() == 'GET':
-                            response = scraper_ref.get(url, timeout=30, allow_redirects=True, **kwargs)
-                        elif method.upper() == 'POST':
-                            response = scraper_ref.post(url, timeout=30, allow_redirects=True, **kwargs)
-                        else:
-                            response = scraper_ref.request(method, url, timeout=30, allow_redirects=True, **kwargs)
-                        
-                        # Return response text or JSON (python-aternos expects this format)
-                        if response.status_code == 200:
-                            try:
-                                return response.json()
-                            except:
-                                return response.text
-                        elif response.status_code in [301, 302, 303, 307, 308]:
-                            # Handle redirects - follow them
-                            if 'Location' in response.headers:
-                                return patched_request_cloudflare(response.headers['Location'], 'GET', **kwargs)
-                            return response.text
-                        else:
-                            # For other status codes, return text
-                            return response.text
-                    except Exception as e:
-                        error_str = str(e)
-                        # If it's a Cloudflare error, don't try original (it will fail too)
-                        if 'cloudflare' in error_str.lower() or 'cf-' in error_str.lower():
-                            print(f"   ⚠️ Cloudflare error in patched request_cloudflare: {e}")
-                            raise
-                        # For other errors, try original method as fallback
-                        try:
-                            return original_request_cloudflare(url, method, **kwargs)
-                        except Exception as orig_err:
-                            raise e
-                
-                # Replace the method
-                atconn.request_cloudflare = patched_request_cloudflare
-                print('   ✓ Successfully patched request_cloudflare method to use cloudscraper')
+                        # Replace the session with our cloudscraper
+                        atconn.session = scraper
+                        print('   ✓ Successfully injected cloudscraper session')
+                    except Exception as inject_error:
+                        print(f'   ⚠️ Could not inject session: {inject_error}')
         
-        # Wait a moment before login to let Cloudflare settle
-        print('⏳ Waiting 3 seconds before login to let Cloudflare settle...')
-        await asyncio.sleep(3)
-        
-        # Attempt login with retry logic
+        # Attempt login
         print('🔐 Attempting login with Cloudflare bypass...')
-        login_success = False
-        max_login_retries = 5  # Increased retries
-        
-        for login_retry in range(max_login_retries):
-            try:
-                print(f"   Login attempt {login_retry + 1}/{max_login_retries}...")
-                
-                # Make a warm-up request first to establish session
-                if login_retry == 0 and hasattr(client, 'atconn') and hasattr(client.atconn, 'session'):
-                    try:
-                        print(f"   🔥 Warming up session with test request...")
-                        warmup_response = client.atconn.session.get('https://aternos.org/', timeout=20)
-                        if warmup_response.status_code == 200:
-                            print(f"   ✅ Warm-up successful")
-                            await asyncio.sleep(2)  # Wait a bit after warm-up
-                    except Exception as warmup_err:
-                        print(f"   ⚠️ Warm-up failed: {warmup_err}")
-                
-                client.login(creds['username'], creds['password'])
-                login_success = True
-                break
-            except Exception as login_error:
-                error_str = str(login_error)
-                error_type = type(login_error).__name__
-                
-                # If it's a Cloudflare error and not the last retry, wait and retry
-                if ('Cloudflare' in error_str or 'cloudflare' in error_str.lower() or 'CloudflareError' in error_type):
-                    if login_retry < max_login_retries - 1:
-                        wait_time = (login_retry + 1) * 15  # Wait 15s, 30s, 45s, 60s
-                        print(f"   ⚠️ Cloudflare error on attempt {login_retry + 1}, waiting {wait_time}s before retry...")
-                        await asyncio.sleep(wait_time)
-                        
-                        # Try to refresh the scraper with different config
-                        try:
-                            print(f"   🔄 Refreshing Cloudflare bypass session...")
-                            browser_configs = [
-                                {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
-                                {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
-                                {'browser': 'chrome', 'platform': 'linux', 'desktop': True}
-                            ]
-                            browser_config = browser_configs[login_retry % len(browser_configs)]
-                            new_scraper = cloudscraper.create_scraper(
-                                browser=browser_config,
-                                delay=30 + (login_retry * 5),
-                                debug=False
-                            )
-                            # Update headers
-                            new_scraper.headers.update({
-                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                                'Accept-Language': 'en-US,en;q=0.9',
-                                'Accept-Encoding': 'gzip, deflate, br',
-                                'Connection': 'keep-alive',
-                                'Upgrade-Insecure-Requests': '1',
-                            })
-                            if hasattr(client, 'atconn') and hasattr(client.atconn, 'session'):
-                                client.atconn.session = new_scraper
-                                print(f"   ✅ Session refreshed with {browser_config['browser']}")
-                        except Exception as refresh_err:
-                            print(f"   ⚠️ Could not refresh session: {refresh_err}")
-                        continue
-                    else:
-                        # Last retry failed
-                        print(f'   Login error type: {error_type}')
-                        print(f'   Login error: {error_str}')
-                        raise Exception(
-                            f"Unable to bypass Cloudflare protection after {max_login_retries} attempts.\n\n"
-                            f"This may be due to:\n"
-                            f"• Cloudflare detecting automated requests\n"
-                            f"• IP address being flagged by Cloudflare\n"
-                            f"• Aternos security measures\n"
-                            f"• Network/VPN restrictions\n\n"
-                            f"Original error: {error_str}\n\n"
-                            f"Troubleshooting:\n"
-                            f"• Wait a few minutes and try again\n"
-                            f"• Verify credentials manually at https://aternos.org\n"
-                            f"• Try from a different network/VPN\n"
-                            f"• Check if your IP is blocked"
-                        )
-                else:
-                    # Non-Cloudflare error, raise immediately
-                    raise
+        try:
+            client.login(creds['username'], creds['password'])
+        except Exception as login_error:
             error_str = str(login_error)
             error_type = type(login_error).__name__
             print(f'   Login error type: {error_type}')
@@ -501,10 +260,7 @@ async def connect_to_aternos(guild_id):
             else:
                 raise
         
-        if login_success:
-            print(f'✅ Login successful for guild {guild_id}')
-        else:
-            raise Exception("Login failed after all retry attempts")
+        print(f'✅ Login successful for guild {guild_id}')
         
         servers = client.account.list_servers()
         print(f'Found {len(servers)} server(s) for guild {guild_id}')
@@ -1555,36 +1311,6 @@ async def fetch_countdown_and_button(aternos_server):
     extend_button_exists = False
     
     try:
-        # First, try to get countdown from server status object (most reliable)
-        # JavaScript shows: COUNTDOWN_END = status.countdown ? status.countdown + Math.round(Date.now() / 1000) : false;
-        if hasattr(aternos_server, '_info'):
-            info_data = getattr(aternos_server, '_info')
-            if isinstance(info_data, dict):
-                # Check for countdown in status
-                countdown_from_status = info_data.get('countdown', None)
-                if countdown_from_status is not None:
-                    try:
-                        # Countdown is seconds until server stops
-                        countdown_seconds = int(countdown_from_status)
-                        print(f"✅ Found countdown from status object: {countdown_seconds}s")
-                    except (ValueError, TypeError):
-                        pass
-        
-        # Also check server attributes directly
-        if countdown_seconds is None:
-            if hasattr(aternos_server, 'countdown'):
-                try:
-                    countdown_seconds = int(aternos_server.countdown)
-                    print(f"✅ Found countdown from server attribute: {countdown_seconds}s")
-                except (ValueError, TypeError):
-                    pass
-        
-        # If we have countdown and it's <= 60, button should be visible
-        if countdown_seconds is not None and countdown_seconds <= 60:
-            extend_button_exists = True
-            print(f"✅ Countdown is {countdown_seconds}s (<= 60s), extend button should be visible")
-        
-        # Also fetch HTML to double-check button visibility
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
@@ -1609,22 +1335,27 @@ async def fetch_countdown_and_button(aternos_server):
                             async with session.get(panel_url) as response:
                                 if response.status == 200:
                                     html_content = await response.text()
+                                else:
+                                    print(f"Failed to fetch {panel_url}: Status {response.status}")
                         elif isinstance(session, requests.Session):
                             # Sync requests session
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
                             if response.status_code == 200:
                                 html_content = response.text
+                            else:
+                                print(f"Failed to fetch {panel_url}: Status {response.status_code}")
                         
                         if html_content:
                             # Check for extend button first (more reliable indicator)
+                            # The button HTML structure: <button class="btn btn-tiny btn-success server-extend-end">
                             button_patterns = [
-                                'server-extend-end',
-                                'btn btn-tiny btn-success server-extend-end',
-                                'class="extend"',
+                                'server-extend-end',  # Most specific
+                                'btn btn-tiny btn-success server-extend-end',  # Full class
+                                'class="extend"',  # Extend div wrapper
                                 'server-extend',
                                 'extend-end',
-                                'fas fa-plus',
+                                'fas fa-plus',  # Plus icon inside button
                             ]
                             
                             for pattern in button_patterns:
@@ -1634,19 +1365,38 @@ async def fetch_countdown_and_button(aternos_server):
                                     break
                             
                             # Also check for countdown div which appears with the button
+                            # When server is online, the countdown and extend button are in the same section
                             if 'server-end-countdown' in html_content:
-                                # If countdown exists, check if extend div is nearby
-                                if 'extend' in html_content.lower() or 'fa-plus' in html_content:
-                                    extend_button_exists = True
-                                    print(f"✅ Extend button likely exists (found countdown + extend references)")
+                                # Check if extend div/button exists in the same context
+                                # Look for the structure: <div class="end-countdown">...<div class="extend">...<button class="server-extend-end">
+                                countdown_index = html_content.find('server-end-countdown')
+                                if countdown_index != -1:
+                                    # Check the surrounding area (500 chars before and after countdown)
+                                    context_start = max(0, countdown_index - 500)
+                                    context_end = min(len(html_content), countdown_index + 500)
+                                    context = html_content[context_start:context_end].lower()
+                                    
+                                    if 'extend' in context or 'server-extend-end' in context or 'fa-plus' in context:
+                                        extend_button_exists = True
+                                        print(f"✅ Extend button likely exists (found countdown + extend in same context)")
                             
-                            # Parse countdown from HTML if we don't have it yet
-                            if countdown_seconds is None:
-                                countdown_seconds = parse_countdown_from_html(html_content)
+                            # Parse countdown from HTML
+                            countdown_seconds = parse_countdown_from_html(html_content)
+                            
+                            # If countdown exists and is <= 60, button should be visible (even if not in HTML yet)
+                            if countdown_seconds is not None and countdown_seconds <= 60:
+                                extend_button_exists = True
+                                print(f"✅ Countdown is {countdown_seconds}s (<= 60s), extend button should be visible")
                             
                             if countdown_seconds is not None or extend_button_exists:
                                 print(f"✅ Successfully fetched data from {panel_url}")
                                 break
+                            else:
+                                # Log what we found for debugging
+                                if 'server-end-countdown' in html_content:
+                                    print(f"⚠️ Found countdown element but no extend button detected")
+                                else:
+                                    print(f"ℹ️ No countdown or extend button found in HTML")
                     except Exception as e:
                         print(f"Error fetching {panel_url}: {e}")
                         import traceback
@@ -1674,93 +1424,84 @@ def get_players_online(aternos_server):
         return 0
 
 async def extend_server_time(aternos_server):
-    """Extend server time by clicking the extend button"""
+    """Extend server time by clicking the extend button - uses /ajax/server/extend-end endpoint"""
     try:
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
             
-            # Try multiple extend endpoints - CORRECT ENDPOINT: /ajax/server/extend-end
-            extend_urls = [
-                'https://aternos.org/ajax/server/extend-end',  # CORRECT endpoint from JavaScript
-                f'https://aternos.org/ajax/server/extend-end?id={server_id}',
-                'https://aternos.org/ajax/server/extend',  # Fallback
-                f'https://aternos.org/ajax/server/extend?id={server_id}',
-            ]
+            # Correct endpoint from JavaScript: /ajax/server/extend-end
+            extend_url = 'https://aternos.org/ajax/server/extend-end'
             
-            if hasattr(atconn, 'request_cloudflare'):
-                for extend_url in extend_urls:
-                    try:
-                        # Try POST request to extend endpoint (matches JavaScript: aget('/ajax/server/extend-end'))
-                        print(f"   Trying POST to {extend_url}...")
-                        response = atconn.request_cloudflare(extend_url, 'POST')
-                        if response is not None:
-                            # Check if response indicates success (JavaScript checks: data.success)
-                            if isinstance(response, dict):
-                                # JavaScript expects: if (!data.success) { ... }
-                                if response.get('success', False) is True:
-                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
-                                    return True
-                                elif response.get('status') == 'success' or 'success' in str(response).lower():
-                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
-                                    return True
-                            elif isinstance(response, str):
-                                # Try to parse as JSON
-                                try:
-                                    import json
-                                    parsed = json.loads(response)
-                                    if isinstance(parsed, dict) and parsed.get('success', False) is True:
-                                        print(f"✅✅✅ Server time extended successfully via {extend_url}!")
-                                        return True
-                                except:
-                                    pass
-                                if 'success' in response.lower() or 'ok' in response.lower():
-                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
-                                    return True
-                            else:
-                                # Any response is likely success
-                                print(f"✅✅✅ Server time extended successfully via {extend_url}!")
-                                return True
-                    except Exception as post_err:
-                        print(f"   POST to {extend_url} failed: {post_err}")
-                        # Try GET as fallback
-                        try:
-                            response = atconn.request_cloudflare(extend_url, 'GET')
-                            if response is not None:
-                                print(f"✅✅✅ Server time extended successfully via {extend_url} (GET)!")
-                                return True
-                        except Exception as get_err:
-                            print(f"   GET to {extend_url} also failed: {get_err}")
-                            continue
-            
-            # Try direct session POST
+            # Use the existing authenticated session to avoid Cloudflare issues
             if hasattr(atconn, 'session'):
                 session = atconn.session
                 import requests
+                import json
+                
                 if isinstance(session, requests.Session):
-                    for extend_url in extend_urls:
-                        try:
-                            loop = asyncio.get_event_loop()
-                            response = await loop.run_in_executor(None, lambda: session.post(extend_url, data={}, timeout=10))
-                            if response.status_code in [200, 201]:
-                                # Check response content for success
-                                try:
-                                    response_data = response.json()
-                                    if isinstance(response_data, dict) and response_data.get('success', False) is True:
-                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
+                    try:
+                        # Use POST with empty data (same as JavaScript aget function)
+                        # The session already has authentication cookies, so no Cloudflare challenge
+                        loop = asyncio.get_event_loop()
+                        response = await loop.run_in_executor(
+                            None, 
+                            lambda: session.post(extend_url, data={}, timeout=15, headers={
+                                'X-Requested-With': 'XMLHttpRequest',
+                                'Referer': f'https://aternos.org/server/?id={server_id}',
+                                'Accept': 'application/json, text/javascript, */*; q=0.01'
+                            })
+                        )
+                        
+                        if response.status_code == 200:
+                            try:
+                                # Check response format (JavaScript expects data.success)
+                                response_data = response.json()
+                                if isinstance(response_data, dict):
+                                    if response_data.get('success', False):
+                                        print(f"✅✅✅ Server time extended successfully! Response: {response_data}")
                                         return True
-                                    elif response.status_code == 200:
-                                        # 200 status usually means success
-                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
-                                        return True
-                                except:
-                                    # If JSON parsing fails, assume success on 200 status
-                                    if response.status_code == 200:
-                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
-                                        return True
-                        except Exception as session_err:
-                            print(f"   Direct session POST to {extend_url} failed: {session_err}")
-                            continue
+                                    else:
+                                        error_msg = response_data.get('error', 'Unknown error')
+                                        print(f"⚠️ Extend failed: {error_msg}")
+                                        return False
+                                else:
+                                    # If response is not JSON but status is 200, assume success
+                                    print(f"✅✅✅ Server time extended successfully (status 200)!")
+                                    return True
+                            except (json.JSONDecodeError, ValueError):
+                                # Response is not JSON, but status is 200 - likely success
+                                if 'success' in response.text.lower() or response.text.strip() == '':
+                                    print(f"✅✅✅ Server time extended successfully (status 200, non-JSON response)!")
+                                    return True
+                        else:
+                            print(f"⚠️ Extend request returned status {response.status_code}")
+                    except Exception as session_err:
+                        print(f"   Direct session POST failed: {session_err}")
+                        import traceback
+                        traceback.print_exc()
+            
+            # Fallback: Try request_cloudflare if session method failed
+            if hasattr(atconn, 'request_cloudflare'):
+                try:
+                    print(f"   Trying request_cloudflare as fallback...")
+                    response = atconn.request_cloudflare(extend_url, 'POST')
+                    if response is not None:
+                        # Check if response indicates success
+                        if isinstance(response, dict):
+                            if response.get('success', False):
+                                print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
+                                return True
+                        elif isinstance(response, str):
+                            if 'success' in response.lower():
+                                print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
+                                return True
+                        else:
+                            # Any response is likely success
+                            print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
+                            return True
+                except Exception as cf_err:
+                    print(f"   request_cloudflare failed: {cf_err}")
     except Exception as e:
         print(f"Error extending server time: {e}")
         import traceback
@@ -1815,30 +1556,24 @@ async def monitor_auto_start(guild_id):
                                     pending = queue_info.get('pending', '')
                                     position = queue_info.get('position', None)
                                     
-                                    # CRITICAL: Only confirm when position is 1 or 0
-                                    # Don't confirm just because pending='pending' - wait for position <= 1
-                                    if position is not None:
-                                        if position <= 1:
-                                            # Position <= 1 means queue finished - ready to confirm
-                                            if pending and str(pending).lower() == 'pending':
-                                                confirm_needed = True
-                                                confirm_reason = f"queue position={position}, pending='{pending}' (queue finished)"
-                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                            elif 'confirm' in str(pending).lower():
-                                                confirm_needed = True
-                                                confirm_reason = f"queue position={position}, pending contains 'confirm': '{pending}'"
-                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                            else:
-                                                # Position is 1 but no pending status - still needs confirmation
-                                                confirm_needed = True
-                                                confirm_reason = f"queue position={position} (queue finished)"
-                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                        elif position > 1:
-                                            # Position > 1 means queue not finished yet - DO NOT confirm
-                                            if pending and str(pending).lower() == 'pending':
-                                                print(f"⏳ Queue position {position} with pending status - waiting for position 1 (not ready yet)")
-                                    # If position is unknown/None, don't confirm based on pending alone
-                                    # Wait until we have position information
+                                    # Most reliable indicator
+                                    if pending:
+                                        pending_lower = str(pending).lower()
+                                        if pending_lower == 'pending':
+                                            confirm_needed = True
+                                            confirm_reason = f"queue.pending='{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                        elif 'confirm' in pending_lower:
+                                            confirm_needed = True
+                                            confirm_reason = f"queue.pending contains 'confirm': '{pending}'"
+                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    
+                                    # Position 1 or 0 means queue finished - ALWAYS needs confirmation
+                                    if not confirm_needed and position is not None and position <= 1:
+                                        # Position <= 1 means queue finished, needs confirmation
+                                        confirm_needed = True
+                                        confirm_reason = f"queue position={position} (queue finished)"
+                                        print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
                                     
                                     # Also check if position is very low (2-5) and status is waiting
                                     if not confirm_needed and position is not None and 2 <= position <= 5:
@@ -1922,42 +1657,21 @@ async def monitor_auto_start(guild_id):
                     print(f"🚨🚨🚨 CONFIRMATION REQUIRED - REASON: {confirm_reason} 🚨🚨🚨")
                     print(f"🚀 Attempting AUTOMATIC confirmation for guild {guild_id} (no manual interaction needed)...")
                     
-                    # Wait a moment to ensure server is ready for confirmation
-                    await asyncio.sleep(2)
-                    
                     auto_confirm_success = False
-                    max_retries = 3  # Reduced retries to avoid spam
-                    last_reauth_time = 0
+                    max_retries = 5  # Increased retries
                     
                     for retry in range(max_retries):
                         try:
-                            # Refresh server status first
+                            # Refresh server status and re-authenticate if needed
                             try:
                                 aternos_server.fetch()
-                                
-                                # Double-check that confirmation is still needed and queue is ready
-                                queue_ready = False
-                                if hasattr(aternos_server, '_info'):
-                                    info_data = getattr(aternos_server, '_info')
-                                    if isinstance(info_data, dict) and 'queue' in info_data:
-                                        queue_info = info_data.get('queue', {})
-                                        if isinstance(queue_info, dict):
-                                            position = queue_info.get('position', None)
-                                            pending = queue_info.get('pending', '')
-                                            # Only proceed if position is 1 or 0
-                                            if position is not None and position <= 1:
-                                                if pending and str(pending).lower() == 'pending':
-                                                    queue_ready = True
-                                                elif position == 1:
-                                                    # Position 1 usually means ready
-                                                    queue_ready = True
-                                
-                                if not queue_ready:
-                                    print(f"   Queue not ready yet (position might be > 1). Waiting...")
-                                    await asyncio.sleep(3)
-                                    continue
-                            except Exception as fetch_err:
-                                print(f"   Fetch error: {fetch_err}")
+                            except:
+                                # If fetch fails, try re-authenticating
+                                print(f"   Fetch failed, re-authenticating...")
+                                await connect_to_aternos(guild_id)
+                                aternos_server = server_servers.get(str(guild_id))
+                                if aternos_server:
+                                    aternos_server.fetch()
                             
                             if hasattr(aternos_server, 'atconn'):
                                 atconn = aternos_server.atconn
@@ -1974,21 +1688,13 @@ async def monitor_auto_start(guild_id):
                                     except Exception as lib_err:
                                         error_str = str(lib_err)
                                         print(f"   Library confirm() failed: {lib_err}")
-                                        # Don't re-auth on 400 errors - might just mean not ready yet
-                                        # Only re-auth once per confirmation attempt to avoid spam
-                                        import time
-                                        current_time = time.time()
-                                        if ('401' in error_str or 'token' in error_str.lower()) and (current_time - last_reauth_time) > 10:
+                                        # If it's a token error, try re-auth
+                                        if '400' in error_str or '401' in error_str or 'token' in error_str.lower():
                                             print(f"   Token error detected, re-authenticating...")
-                                            last_reauth_time = current_time
                                             await connect_to_aternos(guild_id)
                                             aternos_server = server_servers.get(str(guild_id))
                                             if aternos_server:
                                                 aternos_server.fetch()
-                                        elif '400' in error_str:
-                                            # 400 might mean not ready yet, wait and retry
-                                            print(f"   400 error - server might not be ready yet, waiting...")
-                                            await asyncio.sleep(5)  # Wait longer for 400 errors
                                 
                                 # Method 2: Try request_cloudflare with server ID
                                 if not auto_confirm_success and hasattr(atconn, 'request_cloudflare'):
@@ -2009,22 +1715,15 @@ async def monitor_auto_start(guild_id):
                                                 print(f"✅✅✅ AUTO-CONFIRMED (POST) for guild {guild_id}!")
                                                 break
                                         except Exception as post_err:
-                                            error_str = str(post_err)
-                                            print(f"   POST failed: {post_err}")
-                                            # If 400 error, might not be ready - wait before retry
-                                            if '400' in error_str:
-                                                print(f"   400 error - waiting before retry...")
-                                                await asyncio.sleep(3)
-                                            else:
-                                                # Try GET as fallback for other errors
-                                                try:
-                                                    response = atconn.request_cloudflare(confirm_url, 'GET')
-                                                    if response is not None:
-                                                        auto_confirm_success = True
-                                                        print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
-                                                        break
-                                                except Exception as get_err:
-                                                    print(f"   GET also failed: {get_err}")
+                                            print(f"   POST failed: {post_err}, trying GET...")
+                                            try:
+                                                response = atconn.request_cloudflare(confirm_url, 'GET')
+                                                if response is not None:
+                                                    auto_confirm_success = True
+                                                    print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
+                                                    break
+                                            except Exception as get_err:
+                                                print(f"   GET also failed: {get_err}")
                                     
                                     except Exception as cf_error:
                                         print(f"   request_cloudflare failed: {cf_error}")
