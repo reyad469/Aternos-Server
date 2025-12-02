@@ -1348,14 +1348,13 @@ async def fetch_countdown_and_button(aternos_server):
                         
                         if html_content:
                             # Check for extend button first (more reliable indicator)
-                            # The button HTML structure: <button class="btn btn-tiny btn-success server-extend-end">
                             button_patterns = [
-                                'server-extend-end',  # Most specific
-                                'btn btn-tiny btn-success server-extend-end',  # Full class
-                                'class="extend"',  # Extend div wrapper
+                                'server-extend-end',
+                                'btn btn-tiny btn-success server-extend-end',
+                                'class="extend"',
                                 'server-extend',
                                 'extend-end',
-                                'fas fa-plus',  # Plus icon inside button
+                                'fas fa-plus',
                             ]
                             
                             for pattern in button_patterns:
@@ -1365,38 +1364,18 @@ async def fetch_countdown_and_button(aternos_server):
                                     break
                             
                             # Also check for countdown div which appears with the button
-                            # When server is online, the countdown and extend button are in the same section
                             if 'server-end-countdown' in html_content:
-                                # Check if extend div/button exists in the same context
-                                # Look for the structure: <div class="end-countdown">...<div class="extend">...<button class="server-extend-end">
-                                countdown_index = html_content.find('server-end-countdown')
-                                if countdown_index != -1:
-                                    # Check the surrounding area (500 chars before and after countdown)
-                                    context_start = max(0, countdown_index - 500)
-                                    context_end = min(len(html_content), countdown_index + 500)
-                                    context = html_content[context_start:context_end].lower()
-                                    
-                                    if 'extend' in context or 'server-extend-end' in context or 'fa-plus' in context:
-                                        extend_button_exists = True
-                                        print(f"✅ Extend button likely exists (found countdown + extend in same context)")
+                                # If countdown exists, check if extend div is nearby
+                                if 'extend' in html_content.lower() or 'fa-plus' in html_content:
+                                    extend_button_exists = True
+                                    print(f"✅ Extend button likely exists (found countdown + extend references)")
                             
                             # Parse countdown from HTML
                             countdown_seconds = parse_countdown_from_html(html_content)
                             
-                            # If countdown exists and is <= 60, button should be visible (even if not in HTML yet)
-                            if countdown_seconds is not None and countdown_seconds <= 60:
-                                extend_button_exists = True
-                                print(f"✅ Countdown is {countdown_seconds}s (<= 60s), extend button should be visible")
-                            
                             if countdown_seconds is not None or extend_button_exists:
                                 print(f"✅ Successfully fetched data from {panel_url}")
                                 break
-                            else:
-                                # Log what we found for debugging
-                                if 'server-end-countdown' in html_content:
-                                    print(f"⚠️ Found countdown element but no extend button detected")
-                                else:
-                                    print(f"ℹ️ No countdown or extend button found in HTML")
                     except Exception as e:
                         print(f"Error fetching {panel_url}: {e}")
                         import traceback
@@ -1424,84 +1403,67 @@ def get_players_online(aternos_server):
         return 0
 
 async def extend_server_time(aternos_server):
-    """Extend server time by clicking the extend button - uses /ajax/server/extend-end endpoint"""
+    """Extend server time by clicking the extend button"""
     try:
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
             
-            # Correct endpoint from JavaScript: /ajax/server/extend-end
-            extend_url = 'https://aternos.org/ajax/server/extend-end'
+            # Try multiple extend endpoints
+            extend_urls = [
+                'https://aternos.org/ajax/server/extend',
+                f'https://aternos.org/ajax/server/extend?id={server_id}',
+                'https://aternos.org/panel/ajax/extend.php',
+                f'https://aternos.org/panel/ajax/extend.php?id={server_id}',
+            ]
             
-            # Use the existing authenticated session to avoid Cloudflare issues
+            if hasattr(atconn, 'request_cloudflare'):
+                for extend_url in extend_urls:
+                    try:
+                        # Try POST request to extend endpoint
+                        print(f"   Trying POST to {extend_url}...")
+                        response = atconn.request_cloudflare(extend_url, 'POST')
+                        if response is not None:
+                            # Check if response indicates success
+                            if isinstance(response, dict):
+                                if response.get('status') == 'success' or 'success' in str(response).lower():
+                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                    return True
+                            elif isinstance(response, str):
+                                if 'success' in response.lower() or 'ok' in response.lower():
+                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                    return True
+                            else:
+                                # Any response is likely success
+                                print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                return True
+                    except Exception as post_err:
+                        print(f"   POST to {extend_url} failed: {post_err}")
+                        # Try GET as fallback
+                        try:
+                            response = atconn.request_cloudflare(extend_url, 'GET')
+                            if response is not None:
+                                print(f"✅✅✅ Server time extended successfully via {extend_url} (GET)!")
+                                return True
+                        except Exception as get_err:
+                            print(f"   GET to {extend_url} also failed: {get_err}")
+                            continue
+            
+            # Try direct session POST
             if hasattr(atconn, 'session'):
                 session = atconn.session
                 import requests
-                import json
-                
                 if isinstance(session, requests.Session):
-                    try:
-                        # Use POST with empty data (same as JavaScript aget function)
-                        # The session already has authentication cookies, so no Cloudflare challenge
-                        loop = asyncio.get_event_loop()
-                        response = await loop.run_in_executor(
-                            None, 
-                            lambda: session.post(extend_url, data={}, timeout=15, headers={
-                                'X-Requested-With': 'XMLHttpRequest',
-                                'Referer': f'https://aternos.org/server/?id={server_id}',
-                                'Accept': 'application/json, text/javascript, */*; q=0.01'
-                            })
-                        )
-                        
-                        if response.status_code == 200:
-                            try:
-                                # Check response format (JavaScript expects data.success)
-                                response_data = response.json()
-                                if isinstance(response_data, dict):
-                                    if response_data.get('success', False):
-                                        print(f"✅✅✅ Server time extended successfully! Response: {response_data}")
-                                        return True
-                                    else:
-                                        error_msg = response_data.get('error', 'Unknown error')
-                                        print(f"⚠️ Extend failed: {error_msg}")
-                                        return False
-                                else:
-                                    # If response is not JSON but status is 200, assume success
-                                    print(f"✅✅✅ Server time extended successfully (status 200)!")
-                                    return True
-                            except (json.JSONDecodeError, ValueError):
-                                # Response is not JSON, but status is 200 - likely success
-                                if 'success' in response.text.lower() or response.text.strip() == '':
-                                    print(f"✅✅✅ Server time extended successfully (status 200, non-JSON response)!")
-                                    return True
-                        else:
-                            print(f"⚠️ Extend request returned status {response.status_code}")
-                    except Exception as session_err:
-                        print(f"   Direct session POST failed: {session_err}")
-                        import traceback
-                        traceback.print_exc()
-            
-            # Fallback: Try request_cloudflare if session method failed
-            if hasattr(atconn, 'request_cloudflare'):
-                try:
-                    print(f"   Trying request_cloudflare as fallback...")
-                    response = atconn.request_cloudflare(extend_url, 'POST')
-                    if response is not None:
-                        # Check if response indicates success
-                        if isinstance(response, dict):
-                            if response.get('success', False):
-                                print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
+                    for extend_url in extend_urls:
+                        try:
+                            loop = asyncio.get_event_loop()
+                            response = await loop.run_in_executor(None, lambda: session.post(extend_url, data={}, timeout=10))
+                            if response.status_code in [200, 201]:
+                                print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
                                 return True
-                        elif isinstance(response, str):
-                            if 'success' in response.lower():
-                                print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
-                                return True
-                        else:
-                            # Any response is likely success
-                            print(f"✅✅✅ Server time extended successfully via request_cloudflare!")
-                            return True
-                except Exception as cf_err:
-                    print(f"   request_cloudflare failed: {cf_err}")
+                        except Exception as session_err:
+                            print(f"   Direct session POST to {extend_url} failed: {session_err}")
+                            continue
     except Exception as e:
         print(f"Error extending server time: {e}")
         import traceback
