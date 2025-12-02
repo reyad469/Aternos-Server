@@ -742,7 +742,6 @@ class ConfirmButton(View):
                                             print(f"   ✅ Direct session GET successful: {result}")
                                             confirm_success = True
                                 elif isinstance(session, requests.Session):
-                                    import asyncio
                                     loop = asyncio.get_event_loop()
                                     response = await loop.run_in_executor(None, session.get, confirm_url)
                                     if response.status_code == 200:
@@ -975,7 +974,6 @@ async def fetch_queue_data_from_panel(aternos_server):
                                     print(f"Failed to fetch {panel_url}: Status {response.status}")
                         elif isinstance(session, requests.Session):
                             # Sync requests session
-                            import asyncio
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
                             print(f"Fetching queue data from: {panel_url} (status: {response.status_code})")
@@ -1035,7 +1033,6 @@ async def fetch_queue_data_from_panel(aternos_server):
                                     # Service Unavailable - silently skip
                                     pass
                         elif isinstance(session, requests.Session):
-                            import asyncio
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, queue_api_url)
                             if response.status_code == 200:
@@ -1380,7 +1377,6 @@ async def monitor_auto_start(guild_id):
                                         
                                         import requests
                                         if isinstance(session, requests.Session):
-                                            import asyncio
                                             loop = asyncio.get_event_loop()
                                             # Try POST with empty data
                                             response = await loop.run_in_executor(None, lambda: session.post(confirm_url, data={}, timeout=10))
@@ -1895,7 +1891,6 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                             
                                             import requests
                                             if isinstance(session, requests.Session):
-                                                import asyncio
                                                 loop = asyncio.get_event_loop()
                                                 # Try POST with empty data
                                                 response = await loop.run_in_executor(None, lambda: session.post(confirm_url, data={}, timeout=10))
@@ -2140,7 +2135,6 @@ async def monitor_queue(ctx, loading_msg, aternos_server, guild_id):
                                                 print(f"Queue API returned status: {response.status}")
                                 elif isinstance(session, requests.Session):
                                     # Sync requests session - run in executor to avoid blocking
-                                    import asyncio
                                     loop = asyncio.get_event_loop()
                                     response = await loop.run_in_executor(None, session.get, queue_url)
                                     if response.status_code == 200:
@@ -2896,7 +2890,6 @@ async def confirm_start(ctx):
                                             print(f"   ✅ Direct session GET successful: {result}")
                                             confirm_success = True
                                 elif isinstance(session, requests.Session):
-                                    import asyncio
                                     loop = asyncio.get_event_loop()
                                     response = await loop.run_in_executor(None, session.get, confirm_url)
                                     if response.status_code == 200:
