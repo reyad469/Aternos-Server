@@ -1311,6 +1311,36 @@ async def fetch_countdown_and_button(aternos_server):
     extend_button_exists = False
     
     try:
+        # First, try to get countdown from server status object (most reliable)
+        # JavaScript shows: COUNTDOWN_END = status.countdown ? status.countdown + Math.round(Date.now() / 1000) : false;
+        if hasattr(aternos_server, '_info'):
+            info_data = getattr(aternos_server, '_info')
+            if isinstance(info_data, dict):
+                # Check for countdown in status
+                countdown_from_status = info_data.get('countdown', None)
+                if countdown_from_status is not None:
+                    try:
+                        # Countdown is seconds until server stops
+                        countdown_seconds = int(countdown_from_status)
+                        print(f"✅ Found countdown from status object: {countdown_seconds}s")
+                    except (ValueError, TypeError):
+                        pass
+        
+        # Also check server attributes directly
+        if countdown_seconds is None:
+            if hasattr(aternos_server, 'countdown'):
+                try:
+                    countdown_seconds = int(aternos_server.countdown)
+                    print(f"✅ Found countdown from server attribute: {countdown_seconds}s")
+                except (ValueError, TypeError):
+                    pass
+        
+        # If we have countdown and it's <= 60, button should be visible
+        if countdown_seconds is not None and countdown_seconds <= 60:
+            extend_button_exists = True
+            print(f"✅ Countdown is {countdown_seconds}s (<= 60s), extend button should be visible")
+        
+        # Also fetch HTML to double-check button visibility
         if hasattr(aternos_server, 'atconn') and hasattr(aternos_server, 'servid'):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
@@ -1335,16 +1365,12 @@ async def fetch_countdown_and_button(aternos_server):
                             async with session.get(panel_url) as response:
                                 if response.status == 200:
                                     html_content = await response.text()
-                                else:
-                                    print(f"Failed to fetch {panel_url}: Status {response.status}")
                         elif isinstance(session, requests.Session):
                             # Sync requests session
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
                             if response.status_code == 200:
                                 html_content = response.text
-                            else:
-                                print(f"Failed to fetch {panel_url}: Status {response.status_code}")
                         
                         if html_content:
                             # Check for extend button first (more reliable indicator)
@@ -1370,8 +1396,9 @@ async def fetch_countdown_and_button(aternos_server):
                                     extend_button_exists = True
                                     print(f"✅ Extend button likely exists (found countdown + extend references)")
                             
-                            # Parse countdown from HTML
-                            countdown_seconds = parse_countdown_from_html(html_content)
+                            # Parse countdown from HTML if we don't have it yet
+                            if countdown_seconds is None:
+                                countdown_seconds = parse_countdown_from_html(html_content)
                             
                             if countdown_seconds is not None or extend_button_exists:
                                 print(f"✅ Successfully fetched data from {panel_url}")
@@ -1409,27 +1436,40 @@ async def extend_server_time(aternos_server):
             atconn = aternos_server.atconn
             server_id = aternos_server.servid
             
-            # Try multiple extend endpoints
+            # Try multiple extend endpoints - CORRECT ENDPOINT: /ajax/server/extend-end
             extend_urls = [
-                'https://aternos.org/ajax/server/extend',
+                'https://aternos.org/ajax/server/extend-end',  # CORRECT endpoint from JavaScript
+                f'https://aternos.org/ajax/server/extend-end?id={server_id}',
+                'https://aternos.org/ajax/server/extend',  # Fallback
                 f'https://aternos.org/ajax/server/extend?id={server_id}',
-                'https://aternos.org/panel/ajax/extend.php',
-                f'https://aternos.org/panel/ajax/extend.php?id={server_id}',
             ]
             
             if hasattr(atconn, 'request_cloudflare'):
                 for extend_url in extend_urls:
                     try:
-                        # Try POST request to extend endpoint
+                        # Try POST request to extend endpoint (matches JavaScript: aget('/ajax/server/extend-end'))
                         print(f"   Trying POST to {extend_url}...")
                         response = atconn.request_cloudflare(extend_url, 'POST')
                         if response is not None:
-                            # Check if response indicates success
+                            # Check if response indicates success (JavaScript checks: data.success)
                             if isinstance(response, dict):
-                                if response.get('status') == 'success' or 'success' in str(response).lower():
+                                # JavaScript expects: if (!data.success) { ... }
+                                if response.get('success', False) is True:
+                                    print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                    return True
+                                elif response.get('status') == 'success' or 'success' in str(response).lower():
                                     print(f"✅✅✅ Server time extended successfully via {extend_url}!")
                                     return True
                             elif isinstance(response, str):
+                                # Try to parse as JSON
+                                try:
+                                    import json
+                                    parsed = json.loads(response)
+                                    if isinstance(parsed, dict) and parsed.get('success', False) is True:
+                                        print(f"✅✅✅ Server time extended successfully via {extend_url}!")
+                                        return True
+                                except:
+                                    pass
                                 if 'success' in response.lower() or 'ok' in response.lower():
                                     print(f"✅✅✅ Server time extended successfully via {extend_url}!")
                                     return True
@@ -1459,8 +1499,21 @@ async def extend_server_time(aternos_server):
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, lambda: session.post(extend_url, data={}, timeout=10))
                             if response.status_code in [200, 201]:
-                                print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
-                                return True
+                                # Check response content for success
+                                try:
+                                    response_data = response.json()
+                                    if isinstance(response_data, dict) and response_data.get('success', False) is True:
+                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
+                                        return True
+                                    elif response.status_code == 200:
+                                        # 200 status usually means success
+                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
+                                        return True
+                                except:
+                                    # If JSON parsing fails, assume success on 200 status
+                                    if response.status_code == 200:
+                                        print(f"✅✅✅ Server time extended successfully via {extend_url} (direct POST)!")
+                                        return True
                         except Exception as session_err:
                             print(f"   Direct session POST to {extend_url} failed: {session_err}")
                             continue
