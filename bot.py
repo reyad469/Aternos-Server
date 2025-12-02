@@ -23,27 +23,77 @@ class CloudflareSession(_OriginalSession):
     def __init__(self, *args, **kwargs):
         # Don't call super().__init__ - we'll replace everything with cloudscraper
         # Create a cloudscraper session with improved settings
-        self._scraper = cloudscraper.create_scraper(
-            browser={
+        # Try multiple browser configurations for better bypass
+        browser_configs = [
+            {
                 'browser': 'chrome',
                 'platform': 'windows',
                 'desktop': True
             },
-            delay=15,  # Increased delay for better bypass
-            debug=False
-        )
-        # Set realistic headers
+            {
+                'browser': 'firefox',
+                'platform': 'windows',
+                'desktop': True
+            },
+            {
+                'browser': 'chrome',
+                'platform': 'linux',
+                'desktop': True
+            }
+        ]
+        
+        scraper = None
+        last_error = None
+        
+        # Try different browser configs
+        for browser_config in browser_configs:
+            try:
+                scraper = cloudscraper.create_scraper(
+                    browser=browser_config,
+                    delay=20,  # Increased delay for better bypass
+                    debug=False,
+                    captcha={'provider': '2captcha', 'api_key': ''}  # Disable captcha solving
+                )
+                # Test if scraper works
+                test_response = scraper.get('https://www.cloudflare.com', timeout=10)
+                if test_response.status_code == 200:
+                    print(f"✅ Cloudflare bypass successful with {browser_config['browser']} on {browser_config['platform']}")
+                    break
+            except Exception as e:
+                last_error = e
+                continue
+        
+        # If all configs failed, use default chrome
+        if scraper is None:
+            print(f"⚠️ All browser configs failed, using default Chrome config")
+            scraper = cloudscraper.create_scraper(
+                browser={
+                    'browser': 'chrome',
+                    'platform': 'windows',
+                    'desktop': True
+                },
+                delay=25,  # Even longer delay
+                debug=False
+            )
+        
+        self._scraper = scraper
+        
+        # Set realistic headers with updated Chrome version
         self._scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
+            'Accept-Encoding': 'gzip, deflate, br, zstd',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
             'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0'
+            'Sec-Fetch-User': '?1',
+            'Cache-Control': 'max-age=0',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"'
         })
         
         # Copy all public attributes and methods from scraper to self
@@ -186,30 +236,94 @@ async def connect_to_aternos(guild_id):
         print(f'Username: {creds["username"]}')
         print(f'Password length: {len(creds["password"])} characters')
         
-        # Create cloudscraper session first with more aggressive settings
+        # Create cloudscraper session with retry logic
         print('🔧 Creating cloudscraper session for Cloudflare bypass...')
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            },
-            delay=15,  # Increased delay for better bypass
-            debug=False
-        )
-        # Set realistic headers
-        scraper.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Cache-Control': 'max-age=0'
-        })
+        scraper = None
+        max_scraper_retries = 3
+        
+        for scraper_retry in range(max_scraper_retries):
+            try:
+                # Try different browser configs
+                browser_configs = [
+                    {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+                    {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
+                    {'browser': 'chrome', 'platform': 'linux', 'desktop': True}
+                ]
+                
+                browser_config = browser_configs[scraper_retry % len(browser_configs)]
+                print(f"   Attempt {scraper_retry + 1}/{max_scraper_retries}: Using {browser_config['browser']} on {browser_config['platform']}...")
+                
+                scraper = cloudscraper.create_scraper(
+                    browser=browser_config,
+                    delay=20 + (scraper_retry * 5),  # Increasing delay: 20, 25, 30
+                    debug=False
+                )
+                
+                # Set realistic headers with updated Chrome version
+                scraper.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate, br, zstd',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
+                    'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"Windows"'
+                })
+                
+                # Test the scraper (but don't fail if test site is blocked)
+                try:
+                    print(f"   Testing Cloudflare bypass...")
+                    test_response = scraper.get('https://www.cloudflare.com', timeout=15)
+                    if test_response.status_code == 200:
+                        print(f"   ✅ Cloudflare bypass test successful!")
+                        break
+                    else:
+                        print(f"   ⚠️ Test returned status {test_response.status_code}, but continuing anyway...")
+                        # Still use this scraper - test site might be blocked but Aternos might work
+                        break
+                except Exception as test_err:
+                    print(f"   ⚠️ Test failed: {test_err}, but continuing anyway...")
+                    # Still use this scraper - test site might be blocked but Aternos might work
+                    break
+            except Exception as scraper_error:
+                print(f"   ⚠️ Scraper creation/test failed: {scraper_error}")
+                if scraper_retry < max_scraper_retries - 1:
+                    print(f"   Waiting 5 seconds before retry...")
+                    await asyncio.sleep(5)
+                else:
+                    # Use default as last resort (even if test failed)
+                    print(f"   Using default Chrome config as fallback...")
+                    try:
+                        scraper = cloudscraper.create_scraper(
+                            browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+                            delay=30,
+                            debug=False
+                        )
+                        scraper.headers.update({
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                            'Accept-Language': 'en-US,en;q=0.9',
+                        })
+                        print(f"   ✅ Fallback scraper created")
+                    except Exception as fallback_err:
+                        print(f"   ❌ Fallback scraper creation also failed: {fallback_err}")
+                        # Continue anyway - might still work
+        
+        # Ensure scraper is set
+        if scraper is None:
+            print(f"   ⚠️ All scraper attempts failed, creating basic scraper...")
+            scraper = cloudscraper.create_scraper(
+                browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+                delay=30,
+                debug=False
+            )
         
         # Create client - it should use CloudflareSession due to our patch
         print('🔧 Creating Aternos client...')
@@ -231,11 +345,94 @@ async def connect_to_aternos(guild_id):
                     except Exception as inject_error:
                         print(f'   ⚠️ Could not inject session: {inject_error}')
         
-        # Attempt login
+        # Wait a moment before login to let Cloudflare settle
+        print('⏳ Waiting 3 seconds before login to let Cloudflare settle...')
+        await asyncio.sleep(3)
+        
+        # Attempt login with retry logic
         print('🔐 Attempting login with Cloudflare bypass...')
-        try:
-            client.login(creds['username'], creds['password'])
-        except Exception as login_error:
+        login_success = False
+        max_login_retries = 5  # Increased retries
+        
+        for login_retry in range(max_login_retries):
+            try:
+                print(f"   Login attempt {login_retry + 1}/{max_login_retries}...")
+                
+                # Make a warm-up request first to establish session
+                if login_retry == 0 and hasattr(client, 'atconn') and hasattr(client.atconn, 'session'):
+                    try:
+                        print(f"   🔥 Warming up session with test request...")
+                        warmup_response = client.atconn.session.get('https://aternos.org/', timeout=20)
+                        if warmup_response.status_code == 200:
+                            print(f"   ✅ Warm-up successful")
+                            await asyncio.sleep(2)  # Wait a bit after warm-up
+                    except Exception as warmup_err:
+                        print(f"   ⚠️ Warm-up failed: {warmup_err}")
+                
+                client.login(creds['username'], creds['password'])
+                login_success = True
+                break
+            except Exception as login_error:
+                error_str = str(login_error)
+                error_type = type(login_error).__name__
+                
+                # If it's a Cloudflare error and not the last retry, wait and retry
+                if ('Cloudflare' in error_str or 'cloudflare' in error_str.lower() or 'CloudflareError' in error_type):
+                    if login_retry < max_login_retries - 1:
+                        wait_time = (login_retry + 1) * 15  # Wait 15s, 30s, 45s, 60s
+                        print(f"   ⚠️ Cloudflare error on attempt {login_retry + 1}, waiting {wait_time}s before retry...")
+                        await asyncio.sleep(wait_time)
+                        
+                        # Try to refresh the scraper with different config
+                        try:
+                            print(f"   🔄 Refreshing Cloudflare bypass session...")
+                            browser_configs = [
+                                {'browser': 'chrome', 'platform': 'windows', 'desktop': True},
+                                {'browser': 'firefox', 'platform': 'windows', 'desktop': True},
+                                {'browser': 'chrome', 'platform': 'linux', 'desktop': True}
+                            ]
+                            browser_config = browser_configs[login_retry % len(browser_configs)]
+                            new_scraper = cloudscraper.create_scraper(
+                                browser=browser_config,
+                                delay=30 + (login_retry * 5),
+                                debug=False
+                            )
+                            # Update headers
+                            new_scraper.headers.update({
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.9',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1',
+                            })
+                            if hasattr(client, 'atconn') and hasattr(client.atconn, 'session'):
+                                client.atconn.session = new_scraper
+                                print(f"   ✅ Session refreshed with {browser_config['browser']}")
+                        except Exception as refresh_err:
+                            print(f"   ⚠️ Could not refresh session: {refresh_err}")
+                        continue
+                    else:
+                        # Last retry failed
+                        print(f'   Login error type: {error_type}')
+                        print(f'   Login error: {error_str}')
+                        raise Exception(
+                            f"Unable to bypass Cloudflare protection after {max_login_retries} attempts.\n\n"
+                            f"This may be due to:\n"
+                            f"• Cloudflare detecting automated requests\n"
+                            f"• IP address being flagged by Cloudflare\n"
+                            f"• Aternos security measures\n"
+                            f"• Network/VPN restrictions\n\n"
+                            f"Original error: {error_str}\n\n"
+                            f"Troubleshooting:\n"
+                            f"• Wait a few minutes and try again\n"
+                            f"• Verify credentials manually at https://aternos.org\n"
+                            f"• Try from a different network/VPN\n"
+                            f"• Check if your IP is blocked"
+                        )
+                else:
+                    # Non-Cloudflare error, raise immediately
+                    raise
             error_str = str(login_error)
             error_type = type(login_error).__name__
             print(f'   Login error type: {error_type}')
@@ -260,7 +457,10 @@ async def connect_to_aternos(guild_id):
             else:
                 raise
         
-        print(f'✅ Login successful for guild {guild_id}')
+        if login_success:
+            print(f'✅ Login successful for guild {guild_id}')
+        else:
+            raise Exception("Login failed after all retry attempts")
         
         servers = client.account.list_servers()
         print(f'Found {len(servers)} server(s) for guild {guild_id}')
