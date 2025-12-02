@@ -1571,24 +1571,30 @@ async def monitor_auto_start(guild_id):
                                     pending = queue_info.get('pending', '')
                                     position = queue_info.get('position', None)
                                     
-                                    # Most reliable indicator
-                                    if pending:
-                                        pending_lower = str(pending).lower()
-                                        if pending_lower == 'pending':
-                                            confirm_needed = True
-                                            confirm_reason = f"queue.pending='{pending}'"
-                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                        elif 'confirm' in pending_lower:
-                                            confirm_needed = True
-                                            confirm_reason = f"queue.pending contains 'confirm': '{pending}'"
-                                            print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
-                                    
-                                    # Position 1 or 0 means queue finished - ALWAYS needs confirmation
-                                    if not confirm_needed and position is not None and position <= 1:
-                                        # Position <= 1 means queue finished, needs confirmation
-                                        confirm_needed = True
-                                        confirm_reason = f"queue position={position} (queue finished)"
-                                        print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                    # CRITICAL: Only confirm when position is 1 or 0
+                                    # Don't confirm just because pending='pending' - wait for position <= 1
+                                    if position is not None:
+                                        if position <= 1:
+                                            # Position <= 1 means queue finished - ready to confirm
+                                            if pending and str(pending).lower() == 'pending':
+                                                confirm_needed = True
+                                                confirm_reason = f"queue position={position}, pending='{pending}' (queue finished)"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                            elif 'confirm' in str(pending).lower():
+                                                confirm_needed = True
+                                                confirm_reason = f"queue position={position}, pending contains 'confirm': '{pending}'"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                            else:
+                                                # Position is 1 but no pending status - still needs confirmation
+                                                confirm_needed = True
+                                                confirm_reason = f"queue position={position} (queue finished)"
+                                                print(f"✅✅✅ CONFIRM DETECTED: {confirm_reason}")
+                                        elif position > 1:
+                                            # Position > 1 means queue not finished yet - DO NOT confirm
+                                            if pending and str(pending).lower() == 'pending':
+                                                print(f"⏳ Queue position {position} with pending status - waiting for position 1 (not ready yet)")
+                                    # If position is unknown/None, don't confirm based on pending alone
+                                    # Wait until we have position information
                                     
                                     # Also check if position is very low (2-5) and status is waiting
                                     if not confirm_needed and position is not None and 2 <= position <= 5:
@@ -1672,21 +1678,42 @@ async def monitor_auto_start(guild_id):
                     print(f"🚨🚨🚨 CONFIRMATION REQUIRED - REASON: {confirm_reason} 🚨🚨🚨")
                     print(f"🚀 Attempting AUTOMATIC confirmation for guild {guild_id} (no manual interaction needed)...")
                     
+                    # Wait a moment to ensure server is ready for confirmation
+                    await asyncio.sleep(2)
+                    
                     auto_confirm_success = False
-                    max_retries = 5  # Increased retries
+                    max_retries = 3  # Reduced retries to avoid spam
+                    last_reauth_time = 0
                     
                     for retry in range(max_retries):
                         try:
-                            # Refresh server status and re-authenticate if needed
+                            # Refresh server status first
                             try:
                                 aternos_server.fetch()
-                            except:
-                                # If fetch fails, try re-authenticating
-                                print(f"   Fetch failed, re-authenticating...")
-                                await connect_to_aternos(guild_id)
-                                aternos_server = server_servers.get(str(guild_id))
-                                if aternos_server:
-                                    aternos_server.fetch()
+                                
+                                # Double-check that confirmation is still needed and queue is ready
+                                queue_ready = False
+                                if hasattr(aternos_server, '_info'):
+                                    info_data = getattr(aternos_server, '_info')
+                                    if isinstance(info_data, dict) and 'queue' in info_data:
+                                        queue_info = info_data.get('queue', {})
+                                        if isinstance(queue_info, dict):
+                                            position = queue_info.get('position', None)
+                                            pending = queue_info.get('pending', '')
+                                            # Only proceed if position is 1 or 0
+                                            if position is not None and position <= 1:
+                                                if pending and str(pending).lower() == 'pending':
+                                                    queue_ready = True
+                                                elif position == 1:
+                                                    # Position 1 usually means ready
+                                                    queue_ready = True
+                                
+                                if not queue_ready:
+                                    print(f"   Queue not ready yet (position might be > 1). Waiting...")
+                                    await asyncio.sleep(3)
+                                    continue
+                            except Exception as fetch_err:
+                                print(f"   Fetch error: {fetch_err}")
                             
                             if hasattr(aternos_server, 'atconn'):
                                 atconn = aternos_server.atconn
@@ -1703,13 +1730,21 @@ async def monitor_auto_start(guild_id):
                                     except Exception as lib_err:
                                         error_str = str(lib_err)
                                         print(f"   Library confirm() failed: {lib_err}")
-                                        # If it's a token error, try re-auth
-                                        if '400' in error_str or '401' in error_str or 'token' in error_str.lower():
+                                        # Don't re-auth on 400 errors - might just mean not ready yet
+                                        # Only re-auth once per confirmation attempt to avoid spam
+                                        import time
+                                        current_time = time.time()
+                                        if ('401' in error_str or 'token' in error_str.lower()) and (current_time - last_reauth_time) > 10:
                                             print(f"   Token error detected, re-authenticating...")
+                                            last_reauth_time = current_time
                                             await connect_to_aternos(guild_id)
                                             aternos_server = server_servers.get(str(guild_id))
                                             if aternos_server:
                                                 aternos_server.fetch()
+                                        elif '400' in error_str:
+                                            # 400 might mean not ready yet, wait and retry
+                                            print(f"   400 error - server might not be ready yet, waiting...")
+                                            await asyncio.sleep(5)  # Wait longer for 400 errors
                                 
                                 # Method 2: Try request_cloudflare with server ID
                                 if not auto_confirm_success and hasattr(atconn, 'request_cloudflare'):
@@ -1730,15 +1765,22 @@ async def monitor_auto_start(guild_id):
                                                 print(f"✅✅✅ AUTO-CONFIRMED (POST) for guild {guild_id}!")
                                                 break
                                         except Exception as post_err:
-                                            print(f"   POST failed: {post_err}, trying GET...")
-                                            try:
-                                                response = atconn.request_cloudflare(confirm_url, 'GET')
-                                                if response is not None:
-                                                    auto_confirm_success = True
-                                                    print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
-                                                    break
-                                            except Exception as get_err:
-                                                print(f"   GET also failed: {get_err}")
+                                            error_str = str(post_err)
+                                            print(f"   POST failed: {post_err}")
+                                            # If 400 error, might not be ready - wait before retry
+                                            if '400' in error_str:
+                                                print(f"   400 error - waiting before retry...")
+                                                await asyncio.sleep(3)
+                                            else:
+                                                # Try GET as fallback for other errors
+                                                try:
+                                                    response = atconn.request_cloudflare(confirm_url, 'GET')
+                                                    if response is not None:
+                                                        auto_confirm_success = True
+                                                        print(f"✅✅✅ AUTO-CONFIRMED (GET) for guild {guild_id}!")
+                                                        break
+                                                except Exception as get_err:
+                                                    print(f"   GET also failed: {get_err}")
                                     
                                     except Exception as cf_error:
                                         print(f"   request_cloudflare failed: {cf_error}")
