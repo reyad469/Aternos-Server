@@ -1260,23 +1260,48 @@ async def check_extend_button_exists(aternos_server):
                 
                 for panel_url in urls_to_try:
                     try:
+                        html_content = None
                         if isinstance(session, aiohttp.ClientSession):
                             async with session.get(panel_url) as response:
                                 if response.status == 200:
                                     html_content = await response.text()
-                                    if 'server-extend-end' in html_content or 'btn btn-tiny btn-success server-extend-end' in html_content:
-                                        return True
                         elif isinstance(session, requests.Session):
                             loop = asyncio.get_event_loop()
                             response = await loop.run_in_executor(None, session.get, panel_url)
                             if response.status_code == 200:
                                 html_content = response.text
-                                if 'server-extend-end' in html_content or 'btn btn-tiny btn-success server-extend-end' in html_content:
+                        
+                        if html_content:
+                            # Try multiple search patterns for the extend button
+                            button_patterns = [
+                                'server-extend-end',
+                                'btn btn-tiny btn-success server-extend-end',
+                                'server-extend-end',
+                                'class="extend"',
+                                'server-extend',
+                                'extend-end',
+                                'fas fa-plus',
+                            ]
+                            
+                            for pattern in button_patterns:
+                                if pattern in html_content:
+                                    print(f"✅ Extend button found using pattern: '{pattern}'")
+                                    return True
+                            
+                            # Also check for the countdown div which appears with the button
+                            if 'server-end-countdown' in html_content:
+                                # If countdown exists, check if extend div is nearby
+                                # The extend button appears in the same section as countdown
+                                if 'extend' in html_content.lower() or 'fa-plus' in html_content:
+                                    print(f"✅ Extend button likely exists (found countdown + extend references)")
                                     return True
                     except Exception as e:
+                        print(f"Error checking extend button from {panel_url}: {e}")
                         continue
     except Exception as e:
-        pass
+        print(f"Error in check_extend_button_exists: {e}")
+        import traceback
+        traceback.print_exc()
     
     return False
 
@@ -1764,11 +1789,25 @@ async def monitor_auto_start(guild_id):
                             # No players online - check countdown timer
                             print(f"👤 No players online for guild {guild_id}, checking countdown timer...")
                             
-                            # First check if extend button exists (indicates countdown <= 60 seconds)
+                            # Try to fetch countdown and check for button in one go
+                            countdown_seconds = await fetch_countdown_from_panel(aternos_server)
+                            
+                            # Also check if extend button exists (indicates countdown <= 60 seconds)
                             extend_button_exists = await check_extend_button_exists(aternos_server)
                             
+                            # If button exists OR countdown < 60, extend
+                            should_extend = False
+                            reason = ""
+                            
                             if extend_button_exists:
-                                print(f"✅ Extend button found - countdown is <= 60 seconds, extending server time...")
+                                should_extend = True
+                                reason = "extend button is visible"
+                            elif countdown_seconds is not None and countdown_seconds < 60:
+                                should_extend = True
+                                reason = f"countdown is {countdown_seconds}s (< 60s)"
+                            
+                            if should_extend:
+                                print(f"🚨 Extending server time - {reason}...")
                                 
                                 extend_success = await extend_server_time(aternos_server)
                                 
@@ -1779,28 +1818,10 @@ async def monitor_auto_start(guild_id):
                                 else:
                                     print(f"⚠️ Failed to extend server time for guild {guild_id}, will retry on next check")
                             else:
-                                # Try to fetch exact countdown
-                                countdown_seconds = await fetch_countdown_from_panel(aternos_server)
-                                
                                 if countdown_seconds is not None:
-                                    print(f"⏱️ Countdown: {countdown_seconds} seconds")
-                                    
-                                    # If countdown is less than 60 seconds, extend server time
-                                    if countdown_seconds < 60:
-                                        print(f"🚨 Countdown is less than 60 seconds ({countdown_seconds}s), extending server time...")
-                                        
-                                        extend_success = await extend_server_time(aternos_server)
-                                        
-                                        if extend_success:
-                                            print(f"✅ Server time extended by 1 minute for guild {guild_id}")
-                                            # Wait a bit for the countdown to update
-                                            await asyncio.sleep(3)
-                                        else:
-                                            print(f"⚠️ Failed to extend server time for guild {guild_id}, will retry on next check")
-                                    else:
-                                        print(f"✅ Countdown is {countdown_seconds}s (>= 60s), no extension needed")
+                                    print(f"✅ Countdown is {countdown_seconds}s (>= 60s), no extension needed")
                                 else:
-                                    print(f"ℹ️ Could not fetch countdown timer for guild {guild_id} (button not visible, countdown > 60s)")
+                                    print(f"ℹ️ Could not fetch countdown timer for guild {guild_id} (button not visible, countdown likely > 60s)")
                         else:
                             # Players are online, no need to extend
                             print(f"👥 {players_online} player(s) online for guild {guild_id}, no extension needed")
