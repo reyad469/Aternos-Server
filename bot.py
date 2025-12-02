@@ -329,21 +329,65 @@ async def connect_to_aternos(guild_id):
         print('🔧 Creating Aternos client...')
         client = Client()
         
-        # After client creation, try to inject cloudscraper into the connection's session
-        # This is a fallback in case the patch didn't work
+        # CRITICAL: Patch the request_cloudflare method to use our cloudscraper
         if hasattr(client, 'atconn'):
             atconn = client.atconn
+            
+            # Replace session with our cloudscraper
             if hasattr(atconn, 'session'):
-                original_session = atconn.session
-                # Only replace if it's not already a CloudflareSession
-                if not hasattr(original_session, '_scraper'):
-                    print('   Injecting cloudscraper into connection session...')
+                print('   Injecting cloudscraper into connection session...')
+                try:
+                    atconn.session = scraper
+                    print('   ✓ Successfully injected cloudscraper session')
+                except Exception as inject_error:
+                    print(f'   ⚠️ Could not inject session: {inject_error}')
+            
+            # CRITICAL: Patch request_cloudflare to bypass python-aternos's failing method
+            if hasattr(atconn, 'request_cloudflare'):
+                original_request_cloudflare = atconn.request_cloudflare
+                # Store scraper in closure to avoid variable scope issues
+                scraper_ref = scraper
+                
+                def patched_request_cloudflare(url, method='GET', **kwargs):
+                    """Patched request_cloudflare that uses our cloudscraper directly"""
                     try:
-                        # Replace the session with our cloudscraper
-                        atconn.session = scraper
-                        print('   ✓ Successfully injected cloudscraper session')
-                    except Exception as inject_error:
-                        print(f'   ⚠️ Could not inject session: {inject_error}')
+                        # Use our cloudscraper session directly
+                        if method.upper() == 'GET':
+                            response = scraper_ref.get(url, timeout=30, allow_redirects=True, **kwargs)
+                        elif method.upper() == 'POST':
+                            response = scraper_ref.post(url, timeout=30, allow_redirects=True, **kwargs)
+                        else:
+                            response = scraper_ref.request(method, url, timeout=30, allow_redirects=True, **kwargs)
+                        
+                        # Return response text or JSON (python-aternos expects this format)
+                        if response.status_code == 200:
+                            try:
+                                return response.json()
+                            except:
+                                return response.text
+                        elif response.status_code in [301, 302, 303, 307, 308]:
+                            # Handle redirects - follow them
+                            if 'Location' in response.headers:
+                                return patched_request_cloudflare(response.headers['Location'], 'GET', **kwargs)
+                            return response.text
+                        else:
+                            # For other status codes, return text
+                            return response.text
+                    except Exception as e:
+                        error_str = str(e)
+                        # If it's a Cloudflare error, don't try original (it will fail too)
+                        if 'cloudflare' in error_str.lower() or 'cf-' in error_str.lower():
+                            print(f"   ⚠️ Cloudflare error in patched request_cloudflare: {e}")
+                            raise
+                        # For other errors, try original method as fallback
+                        try:
+                            return original_request_cloudflare(url, method, **kwargs)
+                        except Exception as orig_err:
+                            raise e
+                
+                # Replace the method
+                atconn.request_cloudflare = patched_request_cloudflare
+                print('   ✓ Successfully patched request_cloudflare method to use cloudscraper')
         
         # Wait a moment before login to let Cloudflare settle
         print('⏳ Waiting 3 seconds before login to let Cloudflare settle...')
